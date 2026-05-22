@@ -1,7 +1,15 @@
-<h1 align="center">ChatGPT2API</h1>
+<h1 align="center">
+  <img src="assets/logo.png" alt="ChatGPT2API" width="72" height="72" />
+  <br />
+  ChatGPT2API
+</h1>
 
 
 <p align="center">ChatGPT2API 主要是对 ChatGPT 官网相关能力进行逆向整理与封装，提供面向 ChatGPT 图片生成、图片编辑、多图组图编辑场景的 OpenAI 兼容图片 API / 代理，并集成在线画图、号池管理、多种账号导入方式与 Docker 自托管部署能力。</p>
+
+<p align="center">
+  <img src="assets/hero.png" alt="ChatGPT2API" width="100%" />
+</p>
 
 > [!NOTE]
 > 本项目是基于 [basketikun/chatgpt2api](https://github.com/basketikun/chatgpt2api) 的二次开发版本，主要在前端 UI/UX、注册机、日志/图片管理等模块上做了增强与重构。
@@ -140,6 +148,36 @@ environment:
 - 全局 HTTP / HTTPS / SOCKS5 / SOCKS5H 代理
 - Cloudflare R2 自动备份（可加密、可选项保留）
 - 全局系统提示词、敏感词过滤、可选的 AI 自动审查
+
+## 安卓客户端
+
+提供配套的安卓客户端 **Draw**，与本项目后端深度对接，覆盖文生图、图生图、画廊、作品管理等场景。
+
+> [!NOTE]
+> 安卓客户端为闭源发布，仅以 APK 形式在 [Releases](https://github.com/RemotePinee/ChatGPT2API/releases) 提供下载；本仓库不包含其源码。后端 API 完全开源，欢迎基于 [`docs/android-integration.md`](docs/android-integration.md) 自行实现客户端。
+
+### 下载安装
+
+1. 在 [Releases](https://github.com/RemotePinee/ChatGPT2API/releases) 页面下载最新版 `Draw-vX.Y.Z.apk`
+2. 安装后启动，首次进入填写：
+   - **后端地址**：你部署的 ChatGPT2API 实例地址（例如 `https://api.example.com`）
+   - **访问密钥**：管理员根 key（`config.json` 的 `auth-key`）或在设置页创建的 user 密钥
+
+### 主要能力
+
+- 文生图 / 图生图，支持参考图、风格预设、比例与张数选择
+- 公共画廊：浏览社区作品、一键复用 prompt、本人发布的可撤回
+- 我的作品：本地缓存 + 云端归属合并，重装 / 换设备不丢图
+- 后台生成：弹窗收起后任务继续跑，完成时全局 Toast 通知
+- 自动刷新可用额度，密钥失效或后端不可达时自动跳回登录页
+
+### 兼容性
+
+| 项 | 要求 |
+|---|---|
+| Android 最低版本 | 8.0（API 26） |
+| 后端版本 | 推荐与客户端发布日期相近的后端版本，至少需要支持 `/v1/images/*`、`/api/gallery/*`、`/api/me/images` 等接口 |
+| 网络 | 客户端走 HTTPS 时后端建议套一层反向代理；HTTP 仅建议局域网调试 |
 
 ## Screenshots
 
