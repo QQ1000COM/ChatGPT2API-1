@@ -1,5 +1,5 @@
 "use client";
-import { ArrowUp, Check, ChevronDown, CornerDownRight, ImagePlus, Infinity as InfinityIcon, LoaderCircle, X } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, CornerDownRight, ImagePlus, Infinity as InfinityIcon, LoaderCircle, ShoppingBag, Sparkles, X } from "lucide-react";
 import {
   useEffect,
   useMemo,
@@ -30,6 +30,110 @@ type ReplyTarget = {
   sourcePrompt: string;
   aiMessage: string;
 };
+
+type CommerceTemplateId = "main" | "detail" | "scene" | "white" | "feature" | "compare" | "promo";
+type CommerceDraft = {
+  template: CommerceTemplateId;
+  product: string;
+  category: string;
+  sellingPoints: string;
+  platform: string;
+  audience: string;
+  style: string;
+  background: string;
+  constraints: string;
+};
+
+const COMMERCE_STORAGE_KEY = "image-commerce-draft";
+const COMMERCE_PLATFORMS = ["淘宝/天猫", "京东", "拼多多", "抖音小店", "小红书", "Amazon"];
+const COMMERCE_STYLES = ["高级简洁", "白底质感", "直播爆款", "国潮氛围", "科技冷感", "温暖生活方式", "轻奢礼盒"];
+const COMMERCE_TEMPLATES: Array<{
+  id: CommerceTemplateId;
+  label: string;
+  size: string;
+  goal: string;
+  structure: string;
+}> = [
+  {
+    id: "main",
+    label: "主图",
+    size: "1:1",
+    goal: "适合电商列表页的高点击商品主图",
+    structure: "商品居中占画面 70%-85%，主体清晰，光线干净，突出核心卖点，预留少量平台安全边距",
+  },
+  {
+    id: "detail",
+    label: "详情页首屏",
+    size: "3:4",
+    goal: "详情页首屏视觉，先建立信任和购买欲",
+    structure: "上方强视觉商品展示，中段展示 3-5 个核心卖点，下方保留参数或使用场景区域",
+  },
+  {
+    id: "scene",
+    label: "场景图",
+    size: "4:3",
+    goal: "把商品放进真实使用场景，增强代入感",
+    structure: "自然场景、真实透视、商品仍是视觉中心，搭配道具服务于卖点",
+  },
+  {
+    id: "white",
+    label: "白底图",
+    size: "1:1",
+    goal: "平台审核友好的干净白底商品图",
+    structure: "纯白或浅灰背景，完整商品轮廓，柔和投影，避免多余装饰",
+  },
+  {
+    id: "feature",
+    label: "卖点细节",
+    size: "1:1",
+    goal: "突出材质、工艺、功能或局部细节",
+    structure: "微距或半剖视角，局部放大，清楚展示质感和功能点",
+  },
+  {
+    id: "compare",
+    label: "对比图",
+    size: "16:9",
+    goal: "展示升级前后、普通款与本商品的差异",
+    structure: "左右对比构图，差异明确，保持真实可信，避免夸张虚假效果",
+  },
+  {
+    id: "promo",
+    label: "活动促销",
+    size: "1:1",
+    goal: "适合大促、上新、节日活动的商品氛围图",
+    structure: "商品主视觉明确，加入节日或活动氛围，留出可后期加价格和活动文案的位置",
+  },
+];
+
+const DEFAULT_COMMERCE_DRAFT: CommerceDraft = {
+  template: "main",
+  product: "",
+  category: "",
+  sellingPoints: "",
+  platform: "淘宝/天猫",
+  audience: "",
+  style: "高级简洁",
+  background: "",
+  constraints: "不要生成虚假品牌、平台水印、二维码、乱码文字；产品结构和材质要真实可信；画面可直接用于电商上架。",
+};
+
+function buildCommercePrompt(draft: CommerceDraft) {
+  const template = COMMERCE_TEMPLATES.find((item) => item.id === draft.template) ?? COMMERCE_TEMPLATES[0];
+  const lines = [
+    `请生成一张${draft.platform}电商${template.label}，用途：${template.goal}。`,
+    draft.product ? `商品：${draft.product}` : "商品：根据参考图保持商品外观、结构、颜色和材质一致",
+    draft.category ? `类目：${draft.category}` : "",
+    draft.sellingPoints ? `核心卖点：${draft.sellingPoints}` : "",
+    draft.audience ? `目标人群：${draft.audience}` : "",
+    `视觉风格：${draft.style}`,
+    draft.background ? `背景/场景：${draft.background}` : "",
+    `构图要求：${template.structure}`,
+    "质感要求：高清商业摄影，干净布光，细节锐利，色彩准确，产品边缘清楚，适合移动端首屏快速识别。",
+    draft.constraints ? `限制：${draft.constraints}` : "",
+  ];
+
+  return lines.filter(Boolean).join("\n");
+}
 
 type ImageComposerProps = {
   prompt: string;
@@ -77,6 +181,8 @@ export function ImageComposer({
   const [isCountMenuOpen, setIsCountMenuOpen] = useState(false);
   const [countMenuPos, setCountMenuPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
   const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const [isCommerceOpen, setIsCommerceOpen] = useState(false);
+  const [commerceDraft, setCommerceDraft] = useState<CommerceDraft>(DEFAULT_COMMERCE_DRAFT);
   const dragCounterRef = useRef(0);
   const sizeMenuRef = useRef<HTMLDivElement>(null);
   const sizeMenuBtnRef = useRef<HTMLButtonElement>(null);
@@ -88,6 +194,37 @@ export function ImageComposer({
   );
   const selectedSize = SIZE_OPTIONS.find((option) => option.value === imageSize) ?? SIZE_OPTIONS[0];
   const parsedCount = Math.max(1, Math.min(8, Number(imageCount) || 1));
+  const selectedCommerceTemplate =
+    COMMERCE_TEMPLATES.find((template) => template.id === commerceDraft.template) ?? COMMERCE_TEMPLATES[0];
+
+  useEffect(() => {
+    try {
+      const rawDraft = window.localStorage.getItem(COMMERCE_STORAGE_KEY);
+      if (!rawDraft) {
+        return;
+      }
+      setCommerceDraft({ ...DEFAULT_COMMERCE_DRAFT, ...JSON.parse(rawDraft) });
+    } catch {
+      window.localStorage.removeItem(COMMERCE_STORAGE_KEY);
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(COMMERCE_STORAGE_KEY, JSON.stringify(commerceDraft));
+  }, [commerceDraft]);
+
+  const updateCommerceDraft = <Key extends keyof CommerceDraft>(key: Key, value: CommerceDraft[Key]) => {
+    setCommerceDraft((draft) => ({ ...draft, [key]: value }));
+  };
+
+  const applyCommercePrompt = (mode: "append" | "replace") => {
+    const nextPrompt = buildCommercePrompt(commerceDraft);
+    onPromptChange(mode === "append" && prompt.trim() ? `${prompt.trim()}\n\n${nextPrompt}` : nextPrompt);
+    if (selectedCommerceTemplate.size) {
+      onImageSizeChange(selectedCommerceTemplate.size);
+    }
+    textareaRef.current?.focus();
+  };
 
   useEffect(() => {
     if (!isSizeMenuOpen) {
@@ -298,6 +435,148 @@ export function ImageComposer({
                 ) : null}
               </div>
             ) : null}
+            <div className="mx-3 mt-3 rounded-2xl border border-emerald-100 bg-emerald-50/70 px-3 py-2 sm:mx-5 sm:mt-4" onClick={(event) => event.stopPropagation()}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsCommerceOpen((open) => !open)}
+                  className="inline-flex h-8 cursor-pointer items-center gap-2 rounded-full bg-white px-3 text-[12px] font-semibold text-emerald-900 ring-1 ring-emerald-100 transition hover:bg-emerald-50 sm:text-[13px]"
+                >
+                  <ShoppingBag className="size-3.5" />
+                  电商工具箱
+                  <ChevronDown className={cn("size-3.5 opacity-60 transition", isCommerceOpen && "rotate-180")} />
+                </button>
+                <div className="flex min-w-0 flex-1 justify-end gap-1.5 overflow-x-auto">
+                  {COMMERCE_TEMPLATES.slice(0, 5).map((template) => (
+                    <button
+                      key={template.id}
+                      type="button"
+                      onClick={() => {
+                        updateCommerceDraft("template", template.id);
+                        onImageSizeChange(template.size);
+                      }}
+                      className={cn(
+                        "h-8 shrink-0 cursor-pointer rounded-full px-3 text-[12px] font-medium transition",
+                        commerceDraft.template === template.id
+                          ? "bg-emerald-900 text-white"
+                          : "bg-white text-emerald-800 ring-1 ring-emerald-100 hover:bg-emerald-50",
+                      )}
+                    >
+                      {template.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {isCommerceOpen ? (
+                <div className="mt-3 grid gap-2 border-t border-emerald-100 pt-3">
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <input
+                      value={commerceDraft.product}
+                      onChange={(event) => updateCommerceDraft("product", event.target.value)}
+                      placeholder="商品名，例如：无线筋膜枪 Pro"
+                      className="h-9 rounded-xl border border-emerald-100 bg-white px-3 text-[13px] text-stone-900 outline-none transition placeholder:text-stone-400 focus:border-emerald-300"
+                    />
+                    <input
+                      value={commerceDraft.category}
+                      onChange={(event) => updateCommerceDraft("category", event.target.value)}
+                      placeholder="类目，例如：家用按摩器/小家电/女装"
+                      className="h-9 rounded-xl border border-emerald-100 bg-white px-3 text-[13px] text-stone-900 outline-none transition placeholder:text-stone-400 focus:border-emerald-300"
+                    />
+                  </div>
+                  <textarea
+                    value={commerceDraft.sellingPoints}
+                    onChange={(event) => updateCommerceDraft("sellingPoints", event.target.value)}
+                    placeholder="核心卖点：轻量便携、长续航、静音、礼盒包装、适合送礼..."
+                    rows={2}
+                    className="min-h-16 resize-none rounded-xl border border-emerald-100 bg-white px-3 py-2 text-[13px] leading-5 text-stone-900 outline-none transition placeholder:text-stone-400 focus:border-emerald-300"
+                  />
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <select
+                      value={commerceDraft.platform}
+                      onChange={(event) => updateCommerceDraft("platform", event.target.value)}
+                      className="h-9 rounded-xl border border-emerald-100 bg-white px-3 text-[13px] text-stone-900 outline-none transition focus:border-emerald-300"
+                    >
+                      {COMMERCE_PLATFORMS.map((platform) => (
+                        <option key={platform} value={platform}>
+                          {platform}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={commerceDraft.style}
+                      onChange={(event) => updateCommerceDraft("style", event.target.value)}
+                      className="h-9 rounded-xl border border-emerald-100 bg-white px-3 text-[13px] text-stone-900 outline-none transition focus:border-emerald-300"
+                    >
+                      {COMMERCE_STYLES.map((style) => (
+                        <option key={style} value={style}>
+                          {style}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={commerceDraft.template}
+                      onChange={(event) => {
+                        const templateId = event.target.value as CommerceTemplateId;
+                        const template = COMMERCE_TEMPLATES.find((item) => item.id === templateId);
+                        updateCommerceDraft("template", templateId);
+                        if (template?.size) {
+                          onImageSizeChange(template.size);
+                        }
+                      }}
+                      className="h-9 rounded-xl border border-emerald-100 bg-white px-3 text-[13px] text-stone-900 outline-none transition focus:border-emerald-300"
+                    >
+                      {COMMERCE_TEMPLATES.map((template) => (
+                        <option key={template.id} value={template.id}>
+                          {template.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <input
+                      value={commerceDraft.audience}
+                      onChange={(event) => updateCommerceDraft("audience", event.target.value)}
+                      placeholder="目标人群，例如：通勤女性/宝妈/办公室人群"
+                      className="h-9 rounded-xl border border-emerald-100 bg-white px-3 text-[13px] text-stone-900 outline-none transition placeholder:text-stone-400 focus:border-emerald-300"
+                    />
+                    <input
+                      value={commerceDraft.background}
+                      onChange={(event) => updateCommerceDraft("background", event.target.value)}
+                      placeholder="背景场景，例如：浅灰影棚/卧室床头/厨房台面"
+                      className="h-9 rounded-xl border border-emerald-100 bg-white px-3 text-[13px] text-stone-900 outline-none transition placeholder:text-stone-400 focus:border-emerald-300"
+                    />
+                  </div>
+                  <input
+                    value={commerceDraft.constraints}
+                    onChange={(event) => updateCommerceDraft("constraints", event.target.value)}
+                    placeholder="限制条件"
+                    className="h-9 rounded-xl border border-emerald-100 bg-white px-3 text-[13px] text-stone-900 outline-none transition placeholder:text-stone-400 focus:border-emerald-300"
+                  />
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="inline-flex items-center gap-1.5 text-[12px] text-emerald-800">
+                      <Sparkles className="size-3.5" />
+                      当前模板会自动使用 {selectedCommerceTemplate.size || "默认"} 比例
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => applyCommercePrompt("append")}
+                        className="h-9 cursor-pointer rounded-full bg-white px-4 text-[13px] font-semibold text-emerald-900 ring-1 ring-emerald-100 transition hover:bg-emerald-50"
+                      >
+                        追加提示词
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => applyCommercePrompt("replace")}
+                        className="h-9 cursor-pointer rounded-full bg-emerald-900 px-4 text-[13px] font-semibold text-white transition hover:bg-emerald-800"
+                      >
+                        替换提示词
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+            </div>
             <Textarea
               ref={textareaRef}
               value={prompt}
