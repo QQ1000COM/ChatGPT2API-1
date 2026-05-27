@@ -44,6 +44,12 @@ type CommerceDraft = {
   constraints: string;
 };
 
+export type CommerceSuitePrompt = {
+  title: string;
+  prompt: string;
+  size: string;
+};
+
 const COMMERCE_STORAGE_KEY = "image-commerce-draft";
 const COMMERCE_PLATFORMS = ["淘宝/天猫", "京东", "拼多多", "抖音小店", "小红书", "Amazon"];
 const COMMERCE_STYLES = ["高级简洁", "白底质感", "直播爆款", "国潮氛围", "科技冷感", "温暖生活方式", "轻奢礼盒"];
@@ -135,6 +141,66 @@ function buildCommercePrompt(draft: CommerceDraft) {
   return lines.filter(Boolean).join("\n");
 }
 
+function buildCommerceDetailSuitePrompts(draft: CommerceDraft): CommerceSuitePrompt[] {
+  const product = draft.product.trim() || "参考图中的商品";
+  const category = draft.category.trim() || "电商商品";
+  const sellingPoints = draft.sellingPoints.trim() || "根据参考图提炼外观、材质、功能、使用价值和购买理由";
+  const audience = draft.audience.trim() || "目标消费者";
+  const background = draft.background.trim() || "干净高级的商业摄影场景";
+  const constraints =
+    draft.constraints.trim() ||
+    "不要生成虚假品牌、平台水印、二维码、乱码文字；产品结构和材质要真实可信；画面可直接用于电商上架。";
+  const base = [
+    `商品：${product}`,
+    `类目：${category}`,
+    `平台：${draft.platform}`,
+    `目标人群：${audience}`,
+    `核心卖点：${sellingPoints}`,
+    `统一视觉风格：${draft.style}`,
+    `统一限制：${constraints}`,
+    "必须严格参考上传的产品图，保持商品外观、颜色、结构、材质、比例和关键细节一致。",
+    "高清电商商业摄影，移动端详情页可用，画面干净，产品主体清楚，避免不可读小字和夸张虚假效果。",
+  ].join("\n");
+
+  return [
+    {
+      title: "01 首屏利益点",
+      size: "3:4",
+      prompt: `${base}\n\n生成详情页模块 01：首屏主视觉。\n画面目标：让用户第一眼知道这是什么商品、适合谁、最大购买理由是什么。\n构图：商品作为主视觉，占画面 60%-75%，背景为${background}，留出顶部和底部安全空间，整体高级、清爽、有点击欲。\n信息表达：围绕最强卖点做视觉化表达，不要生成乱码文字；如需文字区域，只保留干净留白，方便后期加文案。`,
+    },
+    {
+      title: "02 核心卖点",
+      size: "3:4",
+      prompt: `${base}\n\n生成详情页模块 02：核心卖点总览。\n画面目标：把 3-5 个核心卖点转化为清晰的视觉符号和分区展示。\n构图：中心保留完整商品，周围用简洁分区、图标感元素、局部示意来表达卖点；不要出现难以阅读的小字。\n重点：卖点要真实可信，突出购买理由，适合详情页第二屏承接首屏。`,
+    },
+    {
+      title: "03 使用场景",
+      size: "3:4",
+      prompt: `${base}\n\n生成详情页模块 03：真实使用场景。\n画面目标：让买家代入使用后的生活状态或工作场景。\n构图：商品自然出现在${background}或更贴近${audience}的真实场景中，透视自然，主体仍然突出。\n重点：场景要服务于卖点，不要让道具喧宾夺主，画面要像真实电商详情页摄影。`,
+    },
+    {
+      title: "04 材质细节",
+      size: "3:4",
+      prompt: `${base}\n\n生成详情页模块 04：材质和工艺细节。\n画面目标：用近景、微距、局部放大展示质感、做工、接口、纹理、缝线、边缘或关键结构。\n构图：可采用主商品 + 2-3 个局部放大窗口的版式，细节真实锐利，光线柔和。\n重点：不要改变产品真实结构，不虚构不存在的功能。`,
+    },
+    {
+      title: "05 对比说明",
+      size: "16:9",
+      prompt: `${base}\n\n生成详情页模块 05：差异对比图。\n画面目标：表达本商品相对普通产品的优势，例如质感、容量、便携、效率、舒适度、包装或使用体验。\n构图：左右对比或上下对比，左侧为普通/旧体验的弱化示意，右侧为本商品的高级清晰展示。\n重点：对比要克制可信，不要做医疗、绝对化、夸大承诺。`,
+    },
+    {
+      title: "06 参数包装",
+      size: "3:4",
+      prompt: `${base}\n\n生成详情页模块 06：规格、包装、配件或尺寸感。\n画面目标：帮助用户理解商品大小、包装质感、配件组成和送礼属性。\n构图：商品、包装盒、配件或尺度参照整齐排列，背景干净，留出可后期添加参数文案的区域。\n重点：如果参考图没有配件，不要虚构复杂配件；可用抽象尺寸线和留白表达。`,
+    },
+    {
+      title: "07 收尾转化",
+      size: "3:4",
+      prompt: `${base}\n\n生成详情页模块 07：结尾转化氛围图。\n画面目标：作为详情页末屏，强化品牌感、品质感和下单欲望。\n构图：商品以精致静物摄影方式呈现，背景为${background}，氛围温和、有质感，适合放置售后、保障、立即购买等后期文案。\n重点：画面完整、干净、统一，和前面模块像同一套详情页。`,
+    },
+  ];
+}
+
 type ImageComposerProps = {
   prompt: string;
   imageCount: string;
@@ -149,6 +215,10 @@ type ImageComposerProps = {
   onPromptChange: (value: string) => void;
   onImageCountChange: (value: string) => void;
   onImageSizeChange: (value: string) => void;
+  onGenerateCommerceSuite: (payload: {
+    productName: string;
+    prompts: CommerceSuitePrompt[];
+  }) => void | Promise<void>;
   onSubmit: () => void | Promise<void>;
   onPickReferenceImage: () => void;
   onReferenceImageChange: (files: File[]) => void | Promise<void>;
@@ -169,6 +239,7 @@ export function ImageComposer({
   onPromptChange,
   onImageCountChange,
   onImageSizeChange,
+  onGenerateCommerceSuite,
   onSubmit,
   onPickReferenceImage,
   onReferenceImageChange,
@@ -224,6 +295,13 @@ export function ImageComposer({
       onImageSizeChange(selectedCommerceTemplate.size);
     }
     textareaRef.current?.focus();
+  };
+
+  const generateCommerceSuite = () => {
+    void onGenerateCommerceSuite({
+      productName: commerceDraft.product.trim(),
+      prompts: buildCommerceDetailSuitePrompts(commerceDraft),
+    });
   };
 
   useEffect(() => {
@@ -557,7 +635,14 @@ export function ImageComposer({
                       <Sparkles className="size-3.5" />
                       当前模板会自动使用 {selectedCommerceTemplate.size || "默认"} 比例
                     </div>
-                    <div className="flex gap-2">
+                    <div className="flex flex-wrap justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={generateCommerceSuite}
+                        className="h-9 cursor-pointer rounded-full bg-amber-500 px-4 text-[13px] font-semibold text-white transition hover:bg-amber-600"
+                      >
+                        一键详情页套图
+                      </button>
                       <button
                         type="button"
                         onClick={() => applyCommercePrompt("append")}

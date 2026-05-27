@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils";
 import { clearStoredAuthSession, type StoredAuthSession } from "@/store/auth";
 
 const adminNavItems = [
+  { href: "/detail-page", label: "AI详情页" },
   { href: "/image", label: "画图" },
   { href: "/gallery", label: "画廊" },
   { href: "/accounts", label: "号池管理" },
@@ -20,6 +21,7 @@ const adminNavItems = [
 ];
 
 const userNavItems = [
+  { href: "/detail-page", label: "AI详情页" },
   { href: "/image", label: "画图" },
   { href: "/works", label: "我的作品" },
   { href: "/gallery", label: "画廊" },

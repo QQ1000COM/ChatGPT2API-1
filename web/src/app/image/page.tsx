@@ -4,7 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { History, Infinity as InfinityIcon, LoaderCircle, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
-import { ImageComposer } from "@/app/image/components/image-composer";
+import { ImageComposer, type CommerceSuitePrompt } from "@/app/image/components/image-composer";
 import { ImageResults, type ImageLightboxItem, type ImagePublishState } from "@/app/image/components/image-results";
 import { ImageSidebar } from "@/app/image/components/image-sidebar";
 import { ImageLightbox } from "@/components/image-lightbox";
@@ -1566,6 +1566,59 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     // 状态变化已经可见，再弹一条 toast 反而打断节奏。
   };
 
+  const handleCommerceSuiteGenerate = useCallback(
+    async ({ productName, prompts }: { productName: string; prompts: CommerceSuitePrompt[] }) => {
+      const normalizedProductName = productName.trim();
+      if (!normalizedProductName) {
+        toast.error("请先填写产品名");
+        return;
+      }
+      if (referenceImages.length === 0 || referenceImageFiles.length === 0) {
+        toast.error("请先上传一张产品图");
+        return;
+      }
+      if (prompts.length === 0) {
+        toast.error("没有可生成的详情页模块");
+        return;
+      }
+      if (!ensureQuotaForRequest(prompts.length)) {
+        return;
+      }
+
+      const now = new Date().toISOString();
+      const conversationId = createId();
+      const turns: ImageTurn[] = prompts.map((item) => {
+        const turnId = createId();
+        return {
+          id: turnId,
+          prompt: item.prompt,
+          model: "gpt-image-2",
+          mode: "edit",
+          referenceImages,
+          count: 1,
+          size: item.size,
+          images: createLoadingImages(turnId, 1),
+          createdAt: now,
+          status: "queued",
+        };
+      });
+      const conversation: ImageConversation = {
+        id: conversationId,
+        title: `${normalizedProductName}详情页套图`,
+        createdAt: now,
+        updatedAt: now,
+        turns,
+      };
+
+      setSelectedConversationId(conversationId);
+      clearComposerInputs();
+      await persistConversation(conversation);
+      void runConversationQueue(conversationId);
+      toast.success(`已加入 ${prompts.length} 张详情页套图生成队列`);
+    },
+    [ensureQuotaForRequest, persistConversation, referenceImageFiles.length, referenceImages, runConversationQueue],
+  );
+
   return (
     <>
       <section className="relative mx-auto flex h-[calc(100dvh-3.5rem)] min-h-0 w-full max-w-[1380px] flex-col gap-2 overflow-hidden px-0 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] sm:h-[calc(100dvh-4rem)] sm:gap-3 sm:px-3 sm:pb-6">
@@ -1736,6 +1789,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
               onPromptChange={setImagePrompt}
               onImageCountChange={(value) => setImageCount(value ? clampImageCount(value) : "")}
               onImageSizeChange={setImageSize}
+              onGenerateCommerceSuite={handleCommerceSuiteGenerate}
               onSubmit={handleSubmit}
               onPickReferenceImage={() => fileInputRef.current?.click()}
               onReferenceImageChange={handleReferenceImageChange}
