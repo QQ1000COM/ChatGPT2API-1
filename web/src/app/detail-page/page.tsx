@@ -3,7 +3,6 @@
 import { useMemo, useRef, useState } from "react";
 import {
   Download,
-  ImagePlus,
   LoaderCircle,
   Plus,
   RefreshCw,
@@ -18,7 +17,7 @@ import { createImageEditTask, fetchImageTasks, type ImageTask } from "@/lib/api"
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 
-type WorkMode = "detail" | "main";
+type WorkMode = "detail" | "main" | "white";
 type UploadKind = "product" | "reference";
 type JobStatus = "idle" | "queued" | "running" | "success" | "error" | "canceled";
 
@@ -219,13 +218,7 @@ function buildMainItems(form: Parameters<typeof basePrompt>[0]): GeneratedItem[]
         "生成 1:1 高点击电商主图。在同款参考图版式基础上增强产品质感、对比度、光影和空间层次，突出商品核心卖点，画面干净有记忆点，移动端缩略图也能看清。",
     },
     {
-      title: "主图 C 白底质感",
-      subtitle: "平台审核友好",
-      prompt:
-        "生成 1:1 白底或浅色质感主图。参考爆款图的构图比例和产品角度，背景更干净，商品居中占画面 70%-85%，柔和投影，适合平台审核和搜索列表。",
-    },
-    {
-      title: "主图 D 场景种草",
+      title: "主图 C 场景种草",
       subtitle: "更适合内容平台",
       prompt:
         "生成 1:1 场景化爆款主图。参考图决定构图和视觉风格，加入符合目标人群的真实使用场景或氛围道具，商品仍然是主角，适合抖音、小红书和电商种草入口。",
@@ -238,6 +231,33 @@ function buildMainItems(form: Parameters<typeof basePrompt>[0]): GeneratedItem[]
     subtitle: spec.subtitle,
     size: "1:1",
     prompt: `${base}\n\n${spec.prompt}\n只生成一张主图，不要生成详情页，不要拼多张图。`,
+    status: "idle",
+  }));
+}
+
+function buildWhiteItems(form: Parameters<typeof basePrompt>[0]): GeneratedItem[] {
+  const base = basePrompt({ ...form, sameStyle: false });
+  const specs = [
+    {
+      title: "白底图 A 精修白底图",
+      subtitle: "平台审核 / 搜索列表",
+      prompt:
+        "生成 1:1 精修白底商品图。纯白或接近纯白背景，商品居中完整展示，占画面 75%-88%，边缘干净，透视自然，材质、颜色、Logo 和纹理准确，柔和真实投影，不添加文字、边框、促销元素、装饰道具或平台水印，适合淘宝/天猫/京东白底图审核和搜索列表。",
+    },
+    {
+      title: "白底图 B 3D白底图",
+      subtitle: "立体质感 / 高级展示",
+      prompt:
+        "生成 1:1 3D质感白底商品图。白色或浅灰白摄影棚背景，保留真实商品外观和比例，强化立体光影、边缘高光、材质细节和高级商业摄影质感，商品可轻微悬浮或置于极简白色台面，投影自然，不添加文字、促销信息、无关道具、二维码或水印。",
+    },
+  ];
+
+  return specs.map((spec) => ({
+    id: createId(),
+    title: spec.title,
+    subtitle: spec.subtitle,
+    size: "1:1",
+    prompt: `${base}\n\n${spec.prompt}\n只生成一张白底图，不要生成详情页，不要拼多张图。`,
     status: "idle",
   }));
 }
@@ -344,7 +364,7 @@ export default function DetailPageGenerator() {
   );
   const completeCount = items.filter((item) => item.status === "success").length;
   const activeCount = items.filter((item) => item.status === "queued" || item.status === "running").length;
-  const totalCount = mode === "detail" ? 6 : 4;
+  const totalCount = mode === "detail" ? 6 : mode === "main" ? 3 : 2;
 
   const addImages = async (kind: UploadKind, files: File[]) => {
     const images = await filesToUploadImages(files);
@@ -371,9 +391,10 @@ export default function DetailPageGenerator() {
   const runItemTask = async (item: GeneratedItem) => {
     updateItem(item.id, (current) => ({ ...current, status: "queued", error: undefined }));
     try {
-      const taskPrefix = mode === "detail" ? "detail" : "main";
+      const taskPrefix = mode === "detail" ? "detail" : mode === "main" ? "main" : "white";
       const taskId = `${taskPrefix}-${item.id}`;
-      const submitted = await createImageEditTask(taskId, allFiles, item.prompt, "gpt-image-2", item.size);
+      const taskFiles = mode === "white" ? productImages.map((image) => image.file) : allFiles;
+      const submitted = await createImageEditTask(taskId, taskFiles, item.prompt, "gpt-image-2", item.size);
       updateItem(item.id, (current) => applyTaskToItem(current, submitted));
       const finished = await pollTask(submitted.id);
       updateItem(item.id, (current) => applyTaskToItem(current, finished));
@@ -414,12 +435,19 @@ export default function DetailPageGenerator() {
       extra,
       sameStyle,
     };
-    const nextItems = mode === "detail" ? buildDetailItems(form) : buildMainItems(form);
+    const nextItems =
+      mode === "detail" ? buildDetailItems(form) : mode === "main" ? buildMainItems(form) : buildWhiteItems(form);
     setItems(nextItems);
     setIsGenerating(true);
     try {
       await Promise.all(nextItems.map((item) => runItemTask(item)));
-      toast.success(mode === "detail" ? "6 张分页详情页生成流程已结束" : "爆款主图复刻生成流程已结束");
+      toast.success(
+        mode === "detail"
+          ? "6 张分页详情页生成流程已结束"
+          : mode === "main"
+            ? "爆款主图复刻生成流程已结束"
+            : "白底图生成流程已结束",
+      );
     } finally {
       setIsGenerating(false);
     }
@@ -438,15 +466,23 @@ export default function DetailPageGenerator() {
     );
   }
 
-  const pageTitle = mode === "detail" ? "AI 详情页" : "爆款主图";
+  const pageTitle = mode === "detail" ? "AI 详情页" : mode === "main" ? "爆款主图" : "白底图";
   const pageSubTitle =
-    mode === "detail" ? "上传商品，一键生成 6 张分页详情页" : "上传爆款参考图，一键复刻 4 张主图";
-  const referenceTitle = mode === "detail" ? "参考图 / 同款风格图" : "爆款主图参考图";
-  const resultTitle = mode === "detail" ? "详情页分页结果" : "爆款主图复刻结果";
+    mode === "detail"
+      ? "上传商品，一键生成 6 张分页详情页"
+      : mode === "main"
+        ? "上传爆款参考图，一键复刻 3 张主图"
+        : "上传商品图，一键生成精修白底图和 3D 白底图";
+  const referenceTitle =
+    mode === "detail" ? "参考图 / 同款风格图" : mode === "main" ? "爆款主图参考图" : "白底参考图（可选）";
+  const resultTitle =
+    mode === "detail" ? "详情页分页结果" : mode === "main" ? "爆款主图复刻结果" : "白底图生成结果";
   const emptyText =
     mode === "detail"
       ? "上传商品图、参考图并输入商品信息后，点击生成 6 张分页详情页。"
-      : "上传商品图、爆款参考图并输入商品信息后，点击生成爆款主图。";
+      : mode === "main"
+        ? "上传商品图、爆款参考图并输入商品信息后，点击生成爆款主图。"
+        : "上传商品图并输入商品信息后，点击生成精修白底图和 3D 白底图。";
 
   return (
     <main className="min-h-[calc(100dvh-3.5rem)] bg-background text-foreground [background-image:linear-gradient(to_right,rgba(15,23,42,0.06)_1px,transparent_1px),linear-gradient(to_bottom,rgba(15,23,42,0.06)_1px,transparent_1px)] [background-size:32px_32px]">
@@ -483,6 +519,7 @@ export default function DetailPageGenerator() {
               {[
                 ["detail", "详情页分页"],
                 ["main", "爆款主图"],
+                ["white", "白底图"],
               ].map(([value, label]) => (
                 <button
                   key={value}
@@ -571,21 +608,27 @@ export default function DetailPageGenerator() {
               placeholder={
                 mode === "detail"
                   ? "补充要求，例如：描述用英文、参考图同款版式、偏儿童换装卡片风..."
-                  : "补充要求，例如：复刻参考图构图、主图更高端、保留促销留白..."
+                  : mode === "main"
+                    ? "补充要求，例如：复刻参考图构图、主图更高端、保留促销留白..."
+                    : "补充要求，例如：阴影更轻、产品更居中、保留原始颜色、增加金属质感..."
               }
               className="mt-3 h-10 w-full rounded-2xl border border-input bg-background px-4 text-sm outline-none placeholder:text-muted-foreground focus:border-foreground"
             />
 
             <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-              <label className="inline-flex cursor-pointer items-center gap-2 rounded-full bg-secondary px-3 py-2 text-sm text-muted-foreground">
-                <input
-                  type="checkbox"
-                  checked={sameStyle}
-                  onChange={(event) => setSameStyle(event.target.checked)}
-                  className="size-4 accent-foreground"
-                />
-                一键同款参考图版式
-              </label>
+              {mode !== "white" ? (
+                <label className="inline-flex cursor-pointer items-center gap-2 rounded-full bg-secondary px-3 py-2 text-sm text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={sameStyle}
+                    onChange={(event) => setSameStyle(event.target.checked)}
+                    className="size-4 accent-foreground"
+                  />
+                  一键同款参考图版式
+                </label>
+              ) : (
+                <span />
+              )}
               <Button
                 type="button"
                 onClick={() => void handleGenerate()}
@@ -593,7 +636,7 @@ export default function DetailPageGenerator() {
                 className="rounded-full bg-foreground px-5 font-bold text-background hover:bg-foreground/90"
               >
                 {isGenerating ? <LoaderCircle className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
-                {mode === "detail" ? "生成 6 张分页详情页" : "复刻 4 张爆款主图"}
+                {mode === "detail" ? "生成 6 张分页详情页" : mode === "main" ? "复刻 3 张爆款主图" : "生成 2 张白底图"}
               </Button>
             </div>
           </div>
@@ -668,7 +711,7 @@ export default function DetailPageGenerator() {
                                     : "待生成"}
                         </span>
                       </div>
-                      <div className={cn("bg-muted", mode === "main" ? "aspect-square" : "aspect-[3/4]")}>
+                      <div className={cn("bg-muted", mode === "detail" ? "aspect-[3/4]" : "aspect-square")}>
                         {src ? (
                           <img src={src} alt={item.title} className="h-full w-full object-cover" />
                         ) : (
