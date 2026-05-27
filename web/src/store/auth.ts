@@ -19,10 +19,6 @@ const authStorage = localforage.createInstance({
   storeName: "auth",
 });
 
-function hasBrowserStorage() {
-  return typeof globalThis.window !== "undefined";
-}
-
 function normalizeSession(value: unknown, fallbackKey = ""): StoredAuthSession | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -48,7 +44,7 @@ export function getDefaultRouteForRole(role: AuthRole) {
 }
 
 export async function getStoredAuthKey() {
-  if (!hasBrowserStorage()) {
+  if (typeof window === "undefined") {
     return "";
   }
   const value = await authStorage.getItem<string>(AUTH_KEY_STORAGE_KEY);
@@ -56,7 +52,7 @@ export async function getStoredAuthKey() {
 }
 
 export async function getStoredAuthSession() {
-  if (!hasBrowserStorage()) {
+  if (typeof window === "undefined") {
     return null;
   }
 
@@ -102,7 +98,7 @@ export async function setStoredAuthKey(authKey: string) {
 }
 
 export async function clearStoredAuthSession() {
-  if (!hasBrowserStorage()) {
+  if (typeof window === "undefined") {
     return;
   }
   await Promise.all([
