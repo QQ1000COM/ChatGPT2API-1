@@ -17,8 +17,8 @@ import { createImageEditTask, fetchImageTasks, type ImageTask } from "@/lib/api"
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 
-type WorkMode = "detail" | "main" | "white";
-type UploadKind = "product" | "reference";
+type WorkMode = "detail" | "main" | "white" | "resize";
+type UploadKind = "product" | "reference" | "resize";
 type JobStatus = "idle" | "queued" | "running" | "success" | "error" | "canceled";
 
 type UploadImage = {
@@ -27,13 +27,13 @@ type UploadImage = {
   dataUrl: string;
 };
 
-type PlatformSizePreset = {
+type ResizePreset = {
   id: string;
   label: string;
-  description: string;
-  detail: string;
-  main: string;
-  white: string;
+  group: "常用" | "专区";
+  platform: string;
+  width: number;
+  height: number;
 };
 
 type GeneratedItem = {
@@ -53,13 +53,19 @@ const platforms = ["淘宝/天猫", "京东", "拼多多", "抖音小店", "小�
 const regions = ["中国大陆", "中国港澳台", "东南亚", "北美", "欧洲", "日本", "韩国"];
 const languages = ["中文", "英文", "中英双语", "日文", "韩文", "泰文", "越南文"];
 const styles = ["高级简洁", "爆款促销", "小红书种草", "科技质感", "母婴温暖", "轻奢礼盒", "极简白底"];
-const platformSizePresets: PlatformSizePreset[] = [
-  { id: "taobao", label: "淘宝/天猫", description: "详情页 3:4，主图/白底 1:1", detail: "3:4", main: "1:1", white: "1:1" },
-  { id: "jd", label: "京东", description: "详情页 3:4，主图/白底 1:1", detail: "3:4", main: "1:1", white: "1:1" },
-  { id: "pdd", label: "拼多多", description: "详情页 3:4，主图/白底 1:1", detail: "3:4", main: "1:1", white: "1:1" },
-  { id: "douyin", label: "抖音小店", description: "详情页 9:16，主图/白底 1:1", detail: "9:16", main: "1:1", white: "1:1" },
-  { id: "xiaohongshu", label: "小红书", description: "详情页/主图 3:4，白底 1:1", detail: "3:4", main: "3:4", white: "1:1" },
-  { id: "amazon", label: "Amazon", description: "全模式 1:1", detail: "1:1", main: "1:1", white: "1:1" },
+const resizePresets: ResizePreset[] = [
+  { id: "common-square", label: "方形主图", group: "常用", platform: "通用", width: 800, height: 800 },
+  { id: "common-detail", label: "详情页分页", group: "常用", platform: "通用", width: 900, height: 1200 },
+  { id: "common-vertical", label: "竖版广告", group: "常用", platform: "通用", width: 512, height: 750 },
+  { id: "common-horizontal", label: "横版广告", group: "常用", platform: "通用", width: 1120, height: 640 },
+  { id: "taobao-main", label: "淘宝/天猫主图", group: "专区", platform: "淘宝/天猫", width: 800, height: 800 },
+  { id: "taobao-detail", label: "淘宝详情页", group: "专区", platform: "淘宝/天猫", width: 790, height: 1200 },
+  { id: "jd-main", label: "京东主图", group: "专区", platform: "京东", width: 800, height: 800 },
+  { id: "jd-channel", label: "京东频道图", group: "专区", platform: "京东", width: 1120, height: 320 },
+  { id: "pdd-main", label: "拼多多主图", group: "专区", platform: "拼多多", width: 800, height: 800 },
+  { id: "douyin-main", label: "抖音商品图", group: "专区", platform: "抖音小店", width: 1080, height: 1080 },
+  { id: "xiaohongshu-note", label: "小红书竖图", group: "专区", platform: "小红书", width: 1080, height: 1440 },
+  { id: "amazon-main", label: "Amazon 主图", group: "专区", platform: "Amazon", width: 2000, height: 2000 },
 ];
 
 const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -138,6 +144,30 @@ async function sourceToDrawable(src: string) {
   } finally {
     URL.revokeObjectURL(objectUrl);
   }
+}
+
+async function resizeImageDataUrl(src: string, width: number, height: number, fit: "cover" | "contain") {
+  const image = await sourceToDrawable(src);
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) {
+    throw new Error("浏览器不支持图片处理");
+  }
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, width, height);
+
+  const sourceWidth = image.naturalWidth || image.width;
+  const sourceHeight = image.naturalHeight || image.height;
+  const scale =
+    fit === "cover" ? Math.max(width / sourceWidth, height / sourceHeight) : Math.min(width / sourceWidth, height / sourceHeight);
+  const drawWidth = Math.round(sourceWidth * scale);
+  const drawHeight = Math.round(sourceHeight * scale);
+  const drawX = Math.round((width - drawWidth) / 2);
+  const drawY = Math.round((height - drawHeight) / 2);
+  context.drawImage(image, drawX, drawY, drawWidth, drawHeight);
+  return canvas.toDataURL("image/png");
 }
 
 function applyTaskToItem(item: GeneratedItem, task: ImageTask): GeneratedItem {
@@ -399,9 +429,11 @@ export default function DetailPageGenerator() {
   const { isCheckingAuth, session } = useAuthGuard();
   const productInputRef = useRef<HTMLInputElement>(null);
   const referenceInputRef = useRef<HTMLInputElement>(null);
+  const resizeInputRef = useRef<HTMLInputElement>(null);
   const [mode, setMode] = useState<WorkMode>("detail");
   const [productImages, setProductImages] = useState<UploadImage[]>([]);
   const [referenceImages, setReferenceImages] = useState<UploadImage[]>([]);
+  const [resizeImages, setResizeImages] = useState<UploadImage[]>([]);
   const [productName, setProductName] = useState("");
   const [category, setCategory] = useState("");
   const [sellingPoints, setSellingPoints] = useState("");
@@ -409,13 +441,18 @@ export default function DetailPageGenerator() {
   const [region, setRegion] = useState(regions[0]);
   const [language, setLanguage] = useState(languages[0]);
   const [style, setStyle] = useState(styles[0]);
-  const [sizePresetId, setSizePresetId] = useState(platformSizePresets[0].id);
   const [audience, setAudience] = useState("");
   const [priceBand, setPriceBand] = useState("");
   const [extra, setExtra] = useState("");
   const [sameStyle, setSameStyle] = useState(true);
   const [items, setItems] = useState<GeneratedItem[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [resizeGroup, setResizeGroup] = useState<"常用" | "专区">("常用");
+  const [selectedResizeIds, setSelectedResizeIds] = useState<string[]>(["common-square"]);
+  const [customWidth, setCustomWidth] = useState("");
+  const [customHeight, setCustomHeight] = useState("");
+  const [resizeFit, setResizeFit] = useState<"cover" | "contain">("cover");
+  const [isResizing, setIsResizing] = useState(false);
 
   const allFiles = useMemo(
     () => [...productImages.map((image) => image.file), ...referenceImages.map((image) => image.file)],
@@ -423,27 +460,31 @@ export default function DetailPageGenerator() {
   );
   const completeCount = items.filter((item) => item.status === "success").length;
   const activeCount = items.filter((item) => item.status === "queued" || item.status === "running").length;
-  const totalCount = mode === "detail" ? 6 : mode === "main" ? 3 : 2;
-  const sizePreset = platformSizePresets.find((item) => item.id === sizePresetId) || platformSizePresets[0];
-  const currentSize = mode === "detail" ? sizePreset.detail : mode === "main" ? sizePreset.main : sizePreset.white;
+  const totalCount = mode === "detail" ? 6 : mode === "main" ? 3 : mode === "white" ? 2 : 0;
   const canStitchDetail =
     mode === "detail" && items.length === 6 && items.every((item) => item.status === "success" && imageSource(item));
+  const visibleResizePresets = resizePresets.filter((preset) => preset.group === resizeGroup);
+  const selectedResizePresets = resizePresets.filter((preset) => selectedResizeIds.includes(preset.id));
 
   const addImages = async (kind: UploadKind, files: File[]) => {
     const images = await filesToUploadImages(files);
     if (images.length === 0) return;
     if (kind === "product") {
       setProductImages((prev) => [...prev, ...images].slice(0, 10));
-    } else {
+    } else if (kind === "reference") {
       setReferenceImages((prev) => [...prev, ...images].slice(0, 10));
+    } else {
+      setResizeImages((prev) => [...prev, ...images].slice(0, 20));
     }
   };
 
   const removeImage = (kind: UploadKind, id: string) => {
     if (kind === "product") {
       setProductImages((prev) => prev.filter((item) => item.id !== id));
-    } else {
+    } else if (kind === "reference") {
       setReferenceImages((prev) => prev.filter((item) => item.id !== id));
+    } else {
+      setResizeImages((prev) => prev.filter((item) => item.id !== id));
     }
   };
 
@@ -500,10 +541,10 @@ export default function DetailPageGenerator() {
     };
     const nextItems =
       mode === "detail"
-        ? buildDetailItems(form, currentSize)
+        ? buildDetailItems(form, "3:4")
         : mode === "main"
-          ? buildMainItems(form, currentSize)
-          : buildWhiteItems(form, currentSize);
+          ? buildMainItems(form, "1:1")
+          : buildWhiteItems(form, "1:1");
     setItems(nextItems);
     setIsGenerating(true);
     try {
@@ -523,6 +564,70 @@ export default function DetailPageGenerator() {
   const handleModeChange = (nextMode: WorkMode) => {
     setMode(nextMode);
     setItems([]);
+  };
+
+  const toggleResizePreset = (id: string) => {
+    setSelectedResizeIds((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
+  };
+
+  const addCustomResizePreset = () => {
+    const width = Number(customWidth);
+    const height = Number(customHeight);
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1) {
+      toast.error("请输入有效的宽高");
+      return;
+    }
+    const id = `custom-${width}x${height}`;
+    if (!selectedResizeIds.includes(id)) {
+      setSelectedResizeIds((prev) => [...prev, id]);
+    }
+    setCustomWidth("");
+    setCustomHeight("");
+  };
+
+  const getActiveResizeTargets = () => {
+    const customTargets = selectedResizeIds
+      .filter((id) => id.startsWith("custom-"))
+      .map((id) => {
+        const match = id.match(/^custom-(\d+)x(\d+)$/);
+        if (!match) return null;
+        const width = Number(match[1]);
+        const height = Number(match[2]);
+        return { id, label: "自定义尺寸", group: "常用" as const, platform: "自定义", width, height };
+      })
+      .filter(Boolean) as ResizePreset[];
+    return [...selectedResizePresets, ...customTargets];
+  };
+
+  const handleDownloadResizedImages = async () => {
+    const targets = getActiveResizeTargets();
+    if (resizeImages.length === 0) {
+      toast.error("请先上传需要改尺寸的图片");
+      return;
+    }
+    if (targets.length === 0) {
+      toast.error("请选择至少一个尺寸");
+      return;
+    }
+    setIsResizing(true);
+    try {
+      for (const image of resizeImages) {
+        const baseName = image.file.name.replace(/\.[^.]+$/, "") || "image";
+        for (const target of targets) {
+          const dataUrl = await resizeImageDataUrl(image.dataUrl, target.width, target.height, resizeFit);
+          const link = document.createElement("a");
+          link.href = dataUrl;
+          link.download = `${baseName}-${target.width}x${target.height}.png`;
+          link.click();
+          await sleep(120);
+        }
+      }
+      toast.success("尺寸转换已完成下载");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "尺寸转换失败");
+    } finally {
+      setIsResizing(false);
+    }
   };
 
   const handleDownloadDetailLongImage = async () => {
@@ -572,15 +677,24 @@ export default function DetailPageGenerator() {
     );
   }
 
-  const pageTitle = mode === "detail" ? "AI 详情页" : mode === "main" ? "爆款主图" : "白底图";
+  const pageTitle =
+    mode === "detail" ? "AI 详情页" : mode === "main" ? "爆款主图" : mode === "white" ? "白底图" : "尺寸转换";
   const pageSubTitle =
     mode === "detail"
       ? "上传商品，一键生成 6 张分页详情页"
       : mode === "main"
         ? "上传爆款参考图，一键复刻 3 张主图"
-        : "上传商品图，一键生成精修白底图和 3D 白底图";
+        : mode === "white"
+          ? "上传商品图，一键生成精修白底图和 3D 白底图"
+          : "上传图片，选择平台规格，一键导出多尺寸素材";
   const referenceTitle =
-    mode === "detail" ? "参考图 / 同款风格图" : mode === "main" ? "爆款主图参考图" : "白底参考图（可选）";
+    mode === "detail"
+      ? "参考图 / 同款风格图"
+      : mode === "main"
+        ? "爆款主图参考图"
+        : mode === "white"
+          ? "白底参考图（可选）"
+          : "尺寸转换";
   const resultTitle =
     mode === "detail" ? "详情页分页结果" : mode === "main" ? "爆款主图复刻结果" : "白底图生成结果";
   const emptyText =
@@ -608,17 +722,27 @@ export default function DetailPageGenerator() {
         className="hidden"
         onChange={(event) => void addImages("reference", Array.from(event.target.files || []))}
       />
+      <input
+        ref={resizeInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden"
+        onChange={(event) => void addImages("resize", Array.from(event.target.files || []))}
+      />
 
       <section className="mx-auto grid w-full max-w-[1520px] gap-6 px-4 py-6 lg:grid-cols-[minmax(520px,0.92fr)_minmax(560px,1.08fr)] lg:px-8">
         <div className="space-y-4">
-          <div className="rounded-[28px] border border-border bg-card p-4 shadow-sm">
-            <UploadStrip
-              title={referenceTitle}
-              images={referenceImages}
-              onPick={() => referenceInputRef.current?.click()}
-              onRemove={(id) => removeImage("reference", id)}
-            />
-          </div>
+          {mode === "resize" ? null : (
+            <div className="rounded-[28px] border border-border bg-card p-4 shadow-sm">
+              <UploadStrip
+                title={referenceTitle}
+                images={referenceImages}
+                onPick={() => referenceInputRef.current?.click()}
+                onRemove={(id) => removeImage("reference", id)}
+              />
+            </div>
+          )}
 
           <div className="rounded-[30px] border border-border bg-card p-4 shadow-sm">
             <div className="mb-4 inline-flex rounded-full bg-secondary p-1">
@@ -626,6 +750,7 @@ export default function DetailPageGenerator() {
                 ["detail", "详情页分页"],
                 ["main", "爆款主图"],
                 ["white", "白底图"],
+                ["resize", "尺寸转换"],
               ].map(([value, label]) => (
                 <button
                   key={value}
@@ -641,12 +766,146 @@ export default function DetailPageGenerator() {
               ))}
             </div>
 
-            <UploadStrip
-              title="商品图，多角度上传"
-              images={productImages}
-              onPick={() => productInputRef.current?.click()}
-              onRemove={(id) => removeImage("product", id)}
-            />
+            {mode === "resize" ? (
+              <div className="space-y-4">
+                <UploadStrip
+                  title="上传图片，支持多张批量改尺寸"
+                  images={resizeImages}
+                  onPick={() => resizeInputRef.current?.click()}
+                  onRemove={(id) => removeImage("resize", id)}
+                />
+
+                <div className="rounded-2xl border border-border bg-background p-3">
+                  <div className="mb-3 text-sm font-semibold">选择尺寸</div>
+                  <div className="mb-3 grid grid-cols-2 rounded-2xl bg-secondary p-1">
+                    {(["常用", "专区"] as const).map((group) => (
+                      <button
+                        key={group}
+                        type="button"
+                        onClick={() => setResizeGroup(group)}
+                        className={cn(
+                          "h-9 rounded-xl text-sm font-semibold transition",
+                          resizeGroup === group ? "bg-card text-foreground shadow-sm" : "text-muted-foreground",
+                        )}
+                      >
+                        {group}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="mb-3 grid grid-cols-[1fr_1fr_auto] gap-2">
+                    <input
+                      value={customWidth}
+                      onChange={(event) => setCustomWidth(event.target.value.replace(/\D/g, ""))}
+                      placeholder="宽"
+                      className="h-10 rounded-xl border border-input bg-background px-3 text-sm outline-none placeholder:text-muted-foreground focus:border-foreground"
+                    />
+                    <input
+                      value={customHeight}
+                      onChange={(event) => setCustomHeight(event.target.value.replace(/\D/g, ""))}
+                      placeholder="高"
+                      className="h-10 rounded-xl border border-input bg-background px-3 text-sm outline-none placeholder:text-muted-foreground focus:border-foreground"
+                    />
+                    <Button
+                      type="button"
+                      onClick={addCustomResizePreset}
+                      className="rounded-xl bg-foreground text-background hover:bg-foreground/90"
+                    >
+                      添加
+                    </Button>
+                  </div>
+
+                  <div className="max-h-[360px] space-y-1 overflow-y-auto pr-1">
+                    {visibleResizePresets.map((preset) => {
+                      const checked = selectedResizeIds.includes(preset.id);
+                      return (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          onClick={() => toggleResizePreset(preset.id)}
+                          className="flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-sm transition hover:bg-secondary"
+                        >
+                          <span
+                            className={cn(
+                              "grid size-4 place-items-center rounded-full border",
+                              checked ? "border-foreground bg-foreground" : "border-muted-foreground/40 bg-background",
+                            )}
+                          >
+                            {checked ? <span className="size-1.5 rounded-full bg-background" /> : null}
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate font-medium">{preset.label}</span>
+                            <span className="block truncate text-xs text-muted-foreground">{preset.platform}</span>
+                          </span>
+                          <span className="shrink-0 text-xs text-muted-foreground">
+                            {preset.width}x{preset.height}
+                          </span>
+                        </button>
+                      );
+                    })}
+                    {selectedResizeIds
+                      .filter((id) => id.startsWith("custom-"))
+                      .map((id) => {
+                        const match = id.match(/^custom-(\d+)x(\d+)$/);
+                        if (!match) return null;
+                        return (
+                          <button
+                            key={id}
+                            type="button"
+                            onClick={() => toggleResizePreset(id)}
+                            className="flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-sm transition hover:bg-secondary"
+                          >
+                            <span className="grid size-4 place-items-center rounded-full border border-foreground bg-foreground">
+                              <span className="size-1.5 rounded-full bg-background" />
+                            </span>
+                            <span className="min-w-0 flex-1 font-medium">自定义尺寸</span>
+                            <span className="shrink-0 text-xs text-muted-foreground">
+                              {match[1]}x{match[2]}
+                            </span>
+                          </button>
+                        );
+                      })}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="inline-flex rounded-full bg-secondary p-1">
+                    {[
+                      ["cover", "裁切铺满"],
+                      ["contain", "完整留白"],
+                    ].map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => setResizeFit(value as "cover" | "contain")}
+                        className={cn(
+                          "h-9 rounded-full px-4 text-sm font-semibold transition",
+                          resizeFit === value ? "bg-foreground text-background" : "text-muted-foreground",
+                        )}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <Button
+                    type="button"
+                    onClick={() => void handleDownloadResizedImages()}
+                    disabled={isResizing}
+                    className="rounded-full bg-foreground px-5 font-bold text-background hover:bg-foreground/90"
+                  >
+                    {isResizing ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
+                    导出尺寸图
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <UploadStrip
+                  title="商品图，多角度上传"
+                  images={productImages}
+                  onPick={() => productInputRef.current?.click()}
+                  onRemove={(id) => removeImage("product", id)}
+                />
 
             <div className="mt-4 grid gap-3 sm:grid-cols-2">
               <input
@@ -691,23 +950,6 @@ export default function DetailPageGenerator() {
                   ))}
                 </select>
               ))}
-            </div>
-
-            <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,0.62fr)_minmax(0,1fr)]">
-              <select
-                value={sizePresetId}
-                onChange={(event) => setSizePresetId(event.target.value)}
-                className="h-10 rounded-2xl border border-input bg-background px-3 text-sm outline-none focus:border-foreground"
-              >
-                {platformSizePresets.map((preset) => (
-                  <option key={preset.id} value={preset.id}>
-                    一键换平台尺寸：{preset.label}
-                  </option>
-                ))}
-              </select>
-              <div className="flex min-h-10 items-center rounded-2xl border border-border bg-secondary px-3 text-xs text-muted-foreground">
-                当前比例 {currentSize} · {sizePreset.description}
-              </div>
             </div>
 
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
@@ -762,6 +1004,8 @@ export default function DetailPageGenerator() {
                 {mode === "detail" ? "生成 6 张分页详情页" : mode === "main" ? "复刻 3 张爆款主图" : "生成 2 张白底图"}
               </Button>
             </div>
+              </>
+            )}
           </div>
         </div>
 
@@ -776,6 +1020,70 @@ export default function DetailPageGenerator() {
             </div>
           </div>
 
+          {mode === "resize" ? (
+            <div className="rounded-[28px] border border-border bg-card shadow-sm">
+              <div className="flex items-center justify-between border-b border-border px-4 py-3">
+                <div>
+                  <div className="text-sm font-semibold">尺寸转换结果</div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    已上传 {resizeImages.length} 张，已选 {getActiveResizeTargets().length} 个尺寸
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="rounded-full border-border bg-background text-foreground hover:bg-secondary"
+                  onClick={() => void handleDownloadResizedImages()}
+                  disabled={isResizing || resizeImages.length === 0 || getActiveResizeTargets().length === 0}
+                >
+                  {isResizing ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
+                  导出全部
+                </Button>
+              </div>
+
+              <div className="grid gap-3 p-3">
+                {resizeImages.length === 0 ? (
+                  <div className="grid min-h-[520px] place-items-center text-center text-sm text-muted-foreground">
+                    上传图片并选择尺寸后，可一键导出多个平台规格。
+                  </div>
+                ) : (
+                  <>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      {resizeImages.map((image) => (
+                        <div key={image.id} className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+                          <div className="aspect-square bg-muted">
+                            <img src={image.dataUrl} alt="" className="h-full w-full object-cover" />
+                          </div>
+                          <div className="flex items-center justify-between gap-2 px-3 py-2">
+                            <span className="min-w-0 truncate text-xs text-muted-foreground">{image.file.name}</span>
+                            <span className="shrink-0 rounded-full bg-secondary px-2 py-1 text-xs text-muted-foreground">
+                              {resizeFit === "cover" ? "裁切铺满" : "完整留白"}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="rounded-2xl border border-border bg-background p-3">
+                      <div className="mb-2 text-sm font-semibold">将导出这些尺寸</div>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        {getActiveResizeTargets().map((preset) => (
+                          <div
+                            key={preset.id}
+                            className="flex items-center justify-between rounded-xl bg-secondary px-3 py-2 text-sm"
+                          >
+                            <span className="min-w-0 truncate">{preset.label}</span>
+                            <span className="shrink-0 text-xs text-muted-foreground">
+                              {preset.width}x{preset.height}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          ) : (
           <div className="rounded-[28px] border border-border bg-card shadow-sm">
             <div className="flex items-center justify-between border-b border-border px-4 py-3">
               <div>
@@ -883,6 +1191,7 @@ export default function DetailPageGenerator() {
               )}
             </div>
           </div>
+          )}
         </div>
       </section>
     </main>
