@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: chatgpt2api-commerce
+    runtime: docker
+    plan: free
+    autoDeploy: false
+    envVars:
+      - key: STORAGE_BACKEND
+        value: json
+      - key: CHATGPT2API_AUTH_KEY
+        sync: false
+      - key: CHATGPT2API_BASE_URL
+        sync: false

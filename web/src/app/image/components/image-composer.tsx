@@ -513,7 +513,7 @@ export function ImageComposer({
                 ) : null}
               </div>
             ) : null}
-            <div className="mx-3 mt-3 rounded-2xl border border-emerald-100 bg-emerald-50/70 px-3 py-2 sm:mx-5 sm:mt-4" onClick={(event) => event.stopPropagation()}>
+            <div className="hidden" onClick={(event) => event.stopPropagation()}>
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <button
                   type="button"

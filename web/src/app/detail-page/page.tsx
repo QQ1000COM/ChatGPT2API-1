@@ -18,21 +18,23 @@ import { createImageEditTask, fetchImageTasks, type ImageTask } from "@/lib/api"
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 
+type WorkMode = "detail" | "main";
+type UploadKind = "product" | "reference";
+type JobStatus = "idle" | "queued" | "running" | "success" | "error" | "canceled";
+
 type UploadImage = {
   id: string;
   file: File;
   dataUrl: string;
 };
 
-type DetailPageStatus = "idle" | "queued" | "running" | "success" | "error" | "canceled";
-
-type DetailPageItem = {
+type GeneratedItem = {
   id: string;
   title: string;
   subtitle: string;
   size: string;
   prompt: string;
-  status: DetailPageStatus;
+  status: JobStatus;
   taskId?: string;
   imageUrl?: string;
   b64Json?: string;
@@ -74,21 +76,21 @@ async function filesToUploadImages(files: File[]) {
   );
 }
 
-function pageImageSource(page: DetailPageItem) {
-  if (page.b64Json) {
-    return `data:image/png;base64,${page.b64Json}`;
+function imageSource(item: GeneratedItem) {
+  if (item.b64Json) {
+    return `data:image/png;base64,${item.b64Json}`;
   }
-  return page.imageUrl || "";
+  return item.imageUrl || "";
 }
 
-function applyTaskToPage(page: DetailPageItem, task: ImageTask): DetailPageItem {
+function applyTaskToItem(item: GeneratedItem, task: ImageTask): GeneratedItem {
   const first = task.data?.[0];
   if (task.status === "success") {
     if (!first?.url && !first?.b64_json) {
-      return { ...page, status: "error", taskId: task.id, error: "任务成功但未返回图片" };
+      return { ...item, status: "error", taskId: task.id, error: "任务成功但未返回图片" };
     }
     return {
-      ...page,
+      ...item,
       status: "success",
       taskId: task.id,
       imageUrl: first.url,
@@ -98,16 +100,16 @@ function applyTaskToPage(page: DetailPageItem, task: ImageTask): DetailPageItem 
   }
   if (task.status === "error" || task.status === "canceled") {
     return {
-      ...page,
+      ...item,
       status: task.status,
       taskId: task.id,
       error: task.error || (task.status === "canceled" ? "任务已取消" : "生成失败"),
     };
   }
-  return { ...page, status: task.status, taskId: task.id, error: undefined };
+  return { ...item, status: task.status, taskId: task.id, error: undefined };
 }
 
-function buildDetailPages(form: {
+function basePrompt(form: {
   productName: string;
   category: string;
   sellingPoints: string;
@@ -127,12 +129,13 @@ function buildDetailPages(form: {
   const priceBand = form.priceBand.trim() || "符合平台主流价格带";
   const extra = form.extra.trim();
   const sameStyle = form.sameStyle
-    ? "参考图是目标版式和视觉风格，请尽量同款复刻它的排版节奏、分区方式、字体氛围、色彩层次和信息密度。"
+    ? "参考图是目标版式和视觉风格，请尽量同款复刻它的构图节奏、主体比例、色彩层次、信息密度和商业氛围。"
     : "参考图只作为风格参考，不要照搬无关商品。";
-  const base = [
-    `为 ${form.platform} 生成电商详情页分页图。`,
+
+  return [
     `商品名：${product}`,
     `类目：${category}`,
+    `销售平台：${form.platform}`,
     `销售地区：${form.region}`,
     `语言：${form.language}`,
     `视觉风格：${form.style}`,
@@ -143,11 +146,14 @@ function buildDetailPages(form: {
     sameStyle,
     "必须严格参考上传的多角度商品图，保持商品外观、结构、颜色、材质、比例、Logo/纹理位置一致。",
     `如果出现文字，必须使用${form.language}，文字要短、清晰、可读；不要生成乱码、二维码、平台水印、虚假认证、夸大承诺。`,
-    "高清商业视觉，适合移动端详情页，画面真实可信，产品主体清楚。",
+    "高清商业视觉，真实可信，产品主体清楚，可直接用于电商设计参考。",
   ]
     .filter(Boolean)
     .join("\n");
+}
 
+function buildDetailItems(form: Parameters<typeof basePrompt>[0]): GeneratedItem[] {
+  const base = basePrompt(form);
   const specs = [
     {
       title: "01 首屏主视觉",
@@ -193,7 +199,46 @@ function buildDetailPages(form: {
     subtitle: spec.subtitle,
     size: "3:4",
     prompt: `${base}\n\n${spec.prompt}\n只生成这一页，不要把 6 页都放进同一张图。`,
-    status: "idle" as const,
+    status: "idle",
+  }));
+}
+
+function buildMainItems(form: Parameters<typeof basePrompt>[0]): GeneratedItem[] {
+  const base = basePrompt(form);
+  const specs = [
+    {
+      title: "主图 A 同款复刻",
+      subtitle: "最大程度复刻爆款版式",
+      prompt:
+        "生成 1:1 电商爆款主图。把参考图作为爆款主图模板，复刻它的主体位置、视角、背景层次、光影、道具关系、信息区布局和促销氛围，但替换成上传商品图中的商品。商品必须清晰完整，适合淘宝/天猫列表页点击。",
+    },
+    {
+      title: "主图 B 强点击",
+      subtitle: "更强视觉冲击",
+      prompt:
+        "生成 1:1 高点击电商主图。在同款参考图版式基础上增强产品质感、对比度、光影和空间层次，突出商品核心卖点，画面干净有记忆点，移动端缩略图也能看清。",
+    },
+    {
+      title: "主图 C 白底质感",
+      subtitle: "平台审核友好",
+      prompt:
+        "生成 1:1 白底或浅色质感主图。参考爆款图的构图比例和产品角度，背景更干净，商品居中占画面 70%-85%，柔和投影，适合平台审核和搜索列表。",
+    },
+    {
+      title: "主图 D 场景种草",
+      subtitle: "更适合内容平台",
+      prompt:
+        "生成 1:1 场景化爆款主图。参考图决定构图和视觉风格，加入符合目标人群的真实使用场景或氛围道具，商品仍然是主角，适合抖音、小红书和电商种草入口。",
+    },
+  ];
+
+  return specs.map((spec) => ({
+    id: createId(),
+    title: spec.title,
+    subtitle: spec.subtitle,
+    size: "1:1",
+    prompt: `${base}\n\n${spec.prompt}\n只生成一张主图，不要生成详情页，不要拼多张图。`,
+    status: "idle",
   }));
 }
 
@@ -218,15 +263,15 @@ async function pollTask(taskId: string) {
   throw new Error("生成超时，请到日志管理查看该任务是否仍在运行");
 }
 
-function downloadPage(page: DetailPageItem) {
-  const src = pageImageSource(page);
+function downloadItem(item: GeneratedItem) {
+  const src = imageSource(item);
   if (!src) {
-    toast.error("这页还没有可下载图片");
+    toast.error("这张图还不能下载");
     return;
   }
   const link = document.createElement("a");
   link.href = src;
-  link.download = `${page.title}.png`;
+  link.download = `${item.title}.png`;
   link.click();
 }
 
@@ -243,15 +288,18 @@ function UploadStrip({
 }) {
   return (
     <div className="space-y-2">
-      <div className="text-xs font-semibold text-zinc-400">{title}</div>
+      <div className="text-xs font-semibold text-muted-foreground">{title}</div>
       <div className="flex gap-2 overflow-x-auto">
         {images.map((image) => (
-          <div key={image.id} className="relative size-16 shrink-0 overflow-hidden rounded-2xl border border-white/10 bg-zinc-900">
+          <div
+            key={image.id}
+            className="relative size-16 shrink-0 overflow-hidden rounded-2xl border border-border bg-muted"
+          >
             <img src={image.dataUrl} alt="" className="h-full w-full object-cover" />
             <button
               type="button"
               onClick={() => onRemove(image.id)}
-              className="absolute right-1 top-1 inline-flex size-5 items-center justify-center rounded-full bg-black/75 text-white"
+              className="absolute right-1 top-1 inline-flex size-5 items-center justify-center rounded-full bg-foreground/80 text-background"
             >
               <X className="size-3" />
             </button>
@@ -260,7 +308,7 @@ function UploadStrip({
         <button
           type="button"
           onClick={onPick}
-          className="inline-flex size-16 shrink-0 items-center justify-center rounded-2xl border border-dashed border-lime-300/70 bg-white/5 text-lime-300 transition hover:bg-lime-300/10"
+          className="inline-flex size-16 shrink-0 items-center justify-center rounded-2xl border border-dashed border-border bg-muted text-foreground transition hover:bg-secondary"
         >
           <Plus className="size-6" />
         </button>
@@ -273,6 +321,7 @@ export default function DetailPageGenerator() {
   const { isCheckingAuth, session } = useAuthGuard();
   const productInputRef = useRef<HTMLInputElement>(null);
   const referenceInputRef = useRef<HTMLInputElement>(null);
+  const [mode, setMode] = useState<WorkMode>("detail");
   const [productImages, setProductImages] = useState<UploadImage[]>([]);
   const [referenceImages, setReferenceImages] = useState<UploadImage[]>([]);
   const [productName, setProductName] = useState("");
@@ -286,17 +335,18 @@ export default function DetailPageGenerator() {
   const [priceBand, setPriceBand] = useState("");
   const [extra, setExtra] = useState("");
   const [sameStyle, setSameStyle] = useState(true);
-  const [pages, setPages] = useState<DetailPageItem[]>([]);
+  const [items, setItems] = useState<GeneratedItem[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
 
   const allFiles = useMemo(
     () => [...productImages.map((image) => image.file), ...referenceImages.map((image) => image.file)],
     [productImages, referenceImages],
   );
-  const completeCount = pages.filter((page) => page.status === "success").length;
-  const activeCount = pages.filter((page) => page.status === "queued" || page.status === "running").length;
+  const completeCount = items.filter((item) => item.status === "success").length;
+  const activeCount = items.filter((item) => item.status === "queued" || item.status === "running").length;
+  const totalCount = mode === "detail" ? 6 : 4;
 
-  const addImages = async (kind: "product" | "reference", files: File[]) => {
+  const addImages = async (kind: UploadKind, files: File[]) => {
     const images = await filesToUploadImages(files);
     if (images.length === 0) return;
     if (kind === "product") {
@@ -306,7 +356,7 @@ export default function DetailPageGenerator() {
     }
   };
 
-  const removeImage = (kind: "product" | "reference", id: string) => {
+  const removeImage = (kind: UploadKind, id: string) => {
     if (kind === "product") {
       setProductImages((prev) => prev.filter((item) => item.id !== id));
     } else {
@@ -314,20 +364,21 @@ export default function DetailPageGenerator() {
     }
   };
 
-  const updatePage = (id: string, updater: (page: DetailPageItem) => DetailPageItem) => {
-    setPages((prev) => prev.map((page) => (page.id === id ? updater(page) : page)));
+  const updateItem = (id: string, updater: (item: GeneratedItem) => GeneratedItem) => {
+    setItems((prev) => prev.map((item) => (item.id === id ? updater(item) : item)));
   };
 
-  const runPageTask = async (page: DetailPageItem) => {
-    updatePage(page.id, (current) => ({ ...current, status: "queued", error: undefined }));
+  const runItemTask = async (item: GeneratedItem) => {
+    updateItem(item.id, (current) => ({ ...current, status: "queued", error: undefined }));
     try {
-      const taskId = `detail-${page.id}`;
-      const submitted = await createImageEditTask(taskId, allFiles, page.prompt, "gpt-image-2", page.size);
-      updatePage(page.id, (current) => applyTaskToPage(current, submitted));
+      const taskPrefix = mode === "detail" ? "detail" : "main";
+      const taskId = `${taskPrefix}-${item.id}`;
+      const submitted = await createImageEditTask(taskId, allFiles, item.prompt, "gpt-image-2", item.size);
+      updateItem(item.id, (current) => applyTaskToItem(current, submitted));
       const finished = await pollTask(submitted.id);
-      updatePage(page.id, (current) => applyTaskToPage(current, finished));
+      updateItem(item.id, (current) => applyTaskToItem(current, finished));
     } catch (error) {
-      updatePage(page.id, (current) => ({
+      updateItem(item.id, (current) => ({
         ...current,
         status: "error",
         error: error instanceof Error ? error.message : "生成失败",
@@ -345,8 +396,12 @@ export default function DetailPageGenerator() {
       toast.error("请至少上传一张商品图");
       return;
     }
+    if (mode === "main" && referenceImages.length === 0) {
+      toast.error("请上传爆款主图参考图");
+      return;
+    }
 
-    const nextPages = buildDetailPages({
+    const form = {
       productName: normalizedProductName,
       category,
       sellingPoints,
@@ -358,27 +413,43 @@ export default function DetailPageGenerator() {
       priceBand,
       extra,
       sameStyle,
-    });
-    setPages(nextPages);
+    };
+    const nextItems = mode === "detail" ? buildDetailItems(form) : buildMainItems(form);
+    setItems(nextItems);
     setIsGenerating(true);
     try {
-      await Promise.all(nextPages.map((page) => runPageTask(page)));
-      toast.success("6 张详情页分页图生成流程已结束");
+      await Promise.all(nextItems.map((item) => runItemTask(item)));
+      toast.success(mode === "detail" ? "6 张分页详情页生成流程已结束" : "爆款主图复刻生成流程已结束");
     } finally {
       setIsGenerating(false);
     }
   };
 
+  const handleModeChange = (nextMode: WorkMode) => {
+    setMode(nextMode);
+    setItems([]);
+  };
+
   if (isCheckingAuth || !session) {
     return (
       <div className="flex min-h-[60vh] items-center justify-center">
-        <LoaderCircle className="size-5 animate-spin text-zinc-400" />
+        <LoaderCircle className="size-5 animate-spin text-muted-foreground" />
       </div>
     );
   }
 
+  const pageTitle = mode === "detail" ? "AI 详情页" : "爆款主图";
+  const pageSubTitle =
+    mode === "detail" ? "上传商品，一键生成 6 张分页详情页" : "上传爆款参考图，一键复刻 4 张主图";
+  const referenceTitle = mode === "detail" ? "参考图 / 同款风格图" : "爆款主图参考图";
+  const resultTitle = mode === "detail" ? "详情页分页结果" : "爆款主图复刻结果";
+  const emptyText =
+    mode === "detail"
+      ? "上传商品图、参考图并输入商品信息后，点击生成 6 张分页详情页。"
+      : "上传商品图、爆款参考图并输入商品信息后，点击生成爆款主图。";
+
   return (
-    <main className="min-h-[calc(100dvh-3.5rem)] bg-[#101010] text-white">
+    <main className="min-h-[calc(100dvh-3.5rem)] bg-background text-foreground [background-image:linear-gradient(to_right,rgba(15,23,42,0.06)_1px,transparent_1px),linear-gradient(to_bottom,rgba(15,23,42,0.06)_1px,transparent_1px)] [background-size:32px_32px]">
       <input
         ref={productInputRef}
         type="file"
@@ -398,16 +469,35 @@ export default function DetailPageGenerator() {
 
       <section className="mx-auto grid w-full max-w-[1520px] gap-6 px-4 py-6 lg:grid-cols-[minmax(520px,0.92fr)_minmax(560px,1.08fr)] lg:px-8">
         <div className="space-y-4">
-          <div className="rounded-[28px] border border-white/10 bg-[#191919] p-4">
+          <div className="rounded-[28px] border border-border bg-card p-4 shadow-sm">
             <UploadStrip
-              title="参考图 / 同款风格图"
+              title={referenceTitle}
               images={referenceImages}
               onPick={() => referenceInputRef.current?.click()}
               onRemove={(id) => removeImage("reference", id)}
             />
           </div>
 
-          <div className="rounded-[30px] border border-lime-300 bg-[#1b1b1b] p-4 shadow-[0_0_34px_rgba(190,255,0,0.14)]">
+          <div className="rounded-[30px] border border-border bg-card p-4 shadow-sm">
+            <div className="mb-4 inline-flex rounded-full bg-secondary p-1">
+              {[
+                ["detail", "详情页分页"],
+                ["main", "爆款主图"],
+              ].map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => handleModeChange(value as WorkMode)}
+                  className={cn(
+                    "h-9 rounded-full px-4 text-sm font-semibold transition",
+                    mode === value ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
             <UploadStrip
               title="商品图，多角度上传"
               images={productImages}
@@ -420,13 +510,13 @@ export default function DetailPageGenerator() {
                 value={productName}
                 onChange={(event) => setProductName(event.target.value)}
                 placeholder="商品名，例如：M330 II"
-                className="h-11 rounded-2xl border border-white/10 bg-black/30 px-4 text-sm outline-none placeholder:text-zinc-500 focus:border-lime-300"
+                className="h-11 rounded-2xl border border-input bg-background px-4 text-sm outline-none placeholder:text-muted-foreground focus:border-foreground"
               />
               <input
                 value={category}
                 onChange={(event) => setCategory(event.target.value)}
                 placeholder="类目，例如：音箱"
-                className="h-11 rounded-2xl border border-white/10 bg-black/30 px-4 text-sm outline-none placeholder:text-zinc-500 focus:border-lime-300"
+                className="h-11 rounded-2xl border border-input bg-background px-4 text-sm outline-none placeholder:text-muted-foreground focus:border-foreground"
               />
             </div>
 
@@ -435,7 +525,7 @@ export default function DetailPageGenerator() {
               onChange={(event) => setSellingPoints(event.target.value)}
               placeholder="输入商品信息、卖点、参数，例如：多场景可移动音箱、2.1 声学、峰值功率 120W、Hi-Res 双金标..."
               rows={7}
-              className="mt-3 min-h-40 w-full resize-none rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-sm leading-6 outline-none placeholder:text-zinc-500 focus:border-lime-300"
+              className="mt-3 min-h-40 w-full resize-none rounded-2xl border border-input bg-background px-4 py-3 text-sm leading-6 outline-none placeholder:text-muted-foreground focus:border-foreground"
             />
 
             <div className="mt-3 grid gap-3 sm:grid-cols-4">
@@ -449,7 +539,7 @@ export default function DetailPageGenerator() {
                   key={index}
                   value={value as string}
                   onChange={(event) => (setter as (value: string) => void)(event.target.value)}
-                  className="h-10 rounded-2xl border border-white/10 bg-black/30 px-3 text-sm outline-none focus:border-lime-300"
+                  className="h-10 rounded-2xl border border-input bg-background px-3 text-sm outline-none focus:border-foreground"
                 >
                   {(options as string[]).map((option) => (
                     <option key={option} value={option}>
@@ -465,30 +555,34 @@ export default function DetailPageGenerator() {
                 value={audience}
                 onChange={(event) => setAudience(event.target.value)}
                 placeholder="目标人群，例如：宝妈、上班族、送礼人群"
-                className="h-10 rounded-2xl border border-white/10 bg-black/30 px-4 text-sm outline-none placeholder:text-zinc-500 focus:border-lime-300"
+                className="h-10 rounded-2xl border border-input bg-background px-4 text-sm outline-none placeholder:text-muted-foreground focus:border-foreground"
               />
               <input
                 value={priceBand}
                 onChange={(event) => setPriceBand(event.target.value)}
                 placeholder="价格/定位，例如：中高端、性价比、礼盒款"
-                className="h-10 rounded-2xl border border-white/10 bg-black/30 px-4 text-sm outline-none placeholder:text-zinc-500 focus:border-lime-300"
+                className="h-10 rounded-2xl border border-input bg-background px-4 text-sm outline-none placeholder:text-muted-foreground focus:border-foreground"
               />
             </div>
 
             <input
               value={extra}
               onChange={(event) => setExtra(event.target.value)}
-              placeholder="补充要求，例如：描述用英文、参考图同款版式、偏儿童换装卡片风..."
-              className="mt-3 h-10 w-full rounded-2xl border border-white/10 bg-black/30 px-4 text-sm outline-none placeholder:text-zinc-500 focus:border-lime-300"
+              placeholder={
+                mode === "detail"
+                  ? "补充要求，例如：描述用英文、参考图同款版式、偏儿童换装卡片风..."
+                  : "补充要求，例如：复刻参考图构图、主图更高端、保留促销留白..."
+              }
+              className="mt-3 h-10 w-full rounded-2xl border border-input bg-background px-4 text-sm outline-none placeholder:text-muted-foreground focus:border-foreground"
             />
 
             <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-              <label className="inline-flex cursor-pointer items-center gap-2 rounded-full bg-white/5 px-3 py-2 text-sm text-zinc-300">
+              <label className="inline-flex cursor-pointer items-center gap-2 rounded-full bg-secondary px-3 py-2 text-sm text-muted-foreground">
                 <input
                   type="checkbox"
                   checked={sameStyle}
                   onChange={(event) => setSameStyle(event.target.checked)}
-                  className="size-4 accent-lime-300"
+                  className="size-4 accent-foreground"
                 />
                 一键同款参考图版式
               </label>
@@ -496,10 +590,10 @@ export default function DetailPageGenerator() {
                 type="button"
                 onClick={() => void handleGenerate()}
                 disabled={isGenerating}
-                className="rounded-full bg-lime-300 px-5 font-bold text-black hover:bg-lime-200"
+                className="rounded-full bg-foreground px-5 font-bold text-background hover:bg-foreground/90"
               >
                 {isGenerating ? <LoaderCircle className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
-                生成 6 张分页详情页
+                {mode === "detail" ? "生成 6 张分页详情页" : "复刻 4 张爆款主图"}
               </Button>
             </div>
           </div>
@@ -507,28 +601,28 @@ export default function DetailPageGenerator() {
 
         <div className="min-w-0 space-y-5">
           <div className="flex items-center justify-center gap-4">
-            <div className="grid size-16 place-items-center rounded-2xl bg-violet-600 shadow-lg shadow-violet-600/30">
+            <div className="grid size-16 place-items-center rounded-2xl bg-foreground text-background shadow-sm">
               <WandSparkles className="size-7" />
             </div>
             <div>
-              <h1 className="text-4xl font-black tracking-normal text-lime-300">AI 详情页</h1>
-              <p className="mt-1 text-sm text-zinc-400">上传商品，一键生成 6 张分页详情页</p>
+              <h1 className="text-4xl font-black tracking-normal text-foreground">{pageTitle}</h1>
+              <p className="mt-1 text-sm text-muted-foreground">{pageSubTitle}</p>
             </div>
           </div>
 
-          <div className="rounded-[28px] border border-white/10 bg-zinc-950/70">
-            <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+          <div className="rounded-[28px] border border-border bg-card shadow-sm">
+            <div className="flex items-center justify-between border-b border-border px-4 py-3">
               <div>
-                <div className="text-sm font-semibold">详情页分页结果</div>
-                <div className="mt-1 text-xs text-zinc-500">
-                  完成 {completeCount}/6
+                <div className="text-sm font-semibold">{resultTitle}</div>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  完成 {completeCount}/{totalCount}
                   {activeCount > 0 ? `，生成中 ${activeCount}` : ""}
                 </div>
               </div>
               <Button
                 type="button"
                 variant="outline"
-                className="rounded-full border-white/10 bg-white/5 text-white hover:bg-white/10"
+                className="rounded-full border-border bg-background text-foreground hover:bg-secondary"
                 onClick={() => void handleGenerate()}
                 disabled={isGenerating || productImages.length === 0 || !productName.trim()}
               >
@@ -538,67 +632,67 @@ export default function DetailPageGenerator() {
             </div>
 
             <div className="grid gap-3 p-3 sm:grid-cols-2">
-              {pages.length === 0 ? (
-                <div className="col-span-full grid min-h-[520px] place-items-center text-center text-sm text-zinc-500">
-                  上传商品图、参考图并输入商品信息后，点击生成 6 张分页详情页。
+              {items.length === 0 ? (
+                <div className="col-span-full grid min-h-[520px] place-items-center text-center text-sm text-muted-foreground">
+                  {emptyText}
                 </div>
               ) : (
-                pages.map((page) => {
-                  const src = pageImageSource(page);
+                items.map((item) => {
+                  const src = imageSource(item);
                   return (
-                    <div key={page.id} className="overflow-hidden rounded-2xl border border-white/10 bg-[#171717]">
+                    <div key={item.id} className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
                       <div className="flex items-center justify-between gap-2 px-3 py-2">
                         <div className="min-w-0">
-                          <div className="truncate text-sm font-semibold">{page.title}</div>
-                          <div className="truncate text-xs text-zinc-500">{page.subtitle}</div>
+                          <div className="truncate text-sm font-semibold">{item.title}</div>
+                          <div className="truncate text-xs text-muted-foreground">{item.subtitle}</div>
                         </div>
                         <span
                           className={cn(
                             "shrink-0 rounded-full px-2 py-1 text-xs",
-                            page.status === "success" && "bg-lime-300 text-black",
-                            (page.status === "queued" || page.status === "running") && "bg-amber-400 text-black",
-                            (page.status === "error" || page.status === "canceled") && "bg-rose-500 text-white",
-                            page.status === "idle" && "bg-white/10 text-zinc-400",
+                            item.status === "success" && "bg-emerald-100 text-emerald-700",
+                            (item.status === "queued" || item.status === "running") && "bg-amber-400 text-black",
+                            (item.status === "error" || item.status === "canceled") && "bg-rose-100 text-rose-700",
+                            item.status === "idle" && "bg-secondary text-muted-foreground",
                           )}
                         >
-                          {page.status === "success"
+                          {item.status === "success"
                             ? "完成"
-                            : page.status === "queued"
+                            : item.status === "queued"
                               ? "排队"
-                              : page.status === "running"
+                              : item.status === "running"
                                 ? "生成中"
-                                : page.status === "error"
+                                : item.status === "error"
                                   ? "失败"
-                                  : page.status === "canceled"
+                                  : item.status === "canceled"
                                     ? "取消"
                                     : "待生成"}
                         </span>
                       </div>
-                      <div className="aspect-[3/4] bg-black/40">
+                      <div className={cn("bg-muted", mode === "main" ? "aspect-square" : "aspect-[3/4]")}>
                         {src ? (
-                          <img src={src} alt={page.title} className="h-full w-full object-cover" />
+                          <img src={src} alt={item.title} className="h-full w-full object-cover" />
                         ) : (
-                          <div className="grid h-full place-items-center px-5 text-center text-xs leading-5 text-zinc-500">
-                            {page.status === "queued" || page.status === "running" ? (
+                          <div className="grid h-full place-items-center px-5 text-center text-xs leading-5 text-muted-foreground">
+                            {item.status === "queued" || item.status === "running" ? (
                               <span className="inline-flex items-center gap-2">
                                 <LoaderCircle className="size-4 animate-spin" />
-                                {page.taskId ? `任务 ${page.taskId.slice(0, 12)}...` : "正在提交任务..."}
+                                {item.taskId ? `任务 ${item.taskId.slice(0, 12)}...` : "正在提交任务..."}
                               </span>
                             ) : (
-                              page.error || "等待生成"
+                              item.error || "等待生成"
                             )}
                           </div>
                         )}
                       </div>
                       <div className="flex items-center justify-between gap-2 px-3 py-2">
-                        <span className="min-w-0 truncate text-[11px] text-zinc-500">
-                          {page.taskId ? `任务ID：${page.taskId}` : "未提交"}
+                        <span className="min-w-0 truncate text-[11px] text-muted-foreground">
+                          {item.taskId ? `任务ID：${item.taskId}` : "未提交"}
                         </span>
                         <button
                           type="button"
-                          onClick={() => downloadPage(page)}
-                          disabled={page.status !== "success"}
-                          className="inline-flex size-8 shrink-0 items-center justify-center rounded-full bg-white text-black disabled:bg-white/10 disabled:text-zinc-600"
+                          onClick={() => downloadItem(item)}
+                          disabled={item.status !== "success"}
+                          className="inline-flex size-8 shrink-0 items-center justify-center rounded-full bg-foreground text-background disabled:bg-secondary disabled:text-muted-foreground"
                         >
                           <Download className="size-4" />
                         </button>
