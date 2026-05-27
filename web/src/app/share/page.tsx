@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { LoaderCircle } from "lucide-react";
+import { Suspense } from "react";
 
 import { fetchImageShare } from "@/lib/api";
 
@@ -14,7 +15,7 @@ type ShareItem = {
   prompt: string;
 };
 
-export default function SharePage() {
+function ShareContent() {
   const params = useSearchParams();
   const token = params.get("token") || "";
   const [item, setItem] = useState<ShareItem | null>(null);
@@ -61,5 +62,13 @@ export default function SharePage() {
         {item.prompt ? <p className="mt-4 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{item.prompt}</p> : null}
       </aside>
     </main>
+  );
+}
+
+export default function SharePage() {
+  return (
+    <Suspense fallback={<main className="grid min-h-screen place-items-center"><LoaderCircle className="size-5 animate-spin text-muted-foreground" /></main>}>
+      <ShareContent />
+    </Suspense>
   );
 }

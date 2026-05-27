@@ -249,7 +249,7 @@ function WorksPageContent() {
         title: item.name || "图片分享",
         prompt: item.prompt || "",
       });
-      const url = `${window.location.origin}/share/${data.item.token}`;
+      const url = `${window.location.origin}/share?token=${encodeURIComponent(data.item.token)}`;
       await navigator.clipboard.writeText(url);
       toast.success("分享链接已复制");
     } catch (error) {
