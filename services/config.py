@@ -3,9 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import os
+import secrets
 import sys
 from pathlib import Path
 import time
+from datetime import datetime, timezone
 
 from services.storage.base import StorageBackend
 
@@ -22,9 +24,30 @@ DEFAULT_BACKUP_INCLUDE = {
     "sub2api": True,
     "logs": True,
     "image_tasks": True,
+    "image_conversations": True,
     "accounts_snapshot": True,
     "auth_keys_snapshot": True,
     "images": False,
+}
+
+DEFAULT_REMOTE_STORAGE = {
+    "enabled": False,
+    "provider": "local",
+    "path_prefix": "images",
+    "public_base_url": "",
+    "delete_local_after_upload": False,
+    "webdav": {
+        "url": "",
+        "username": "",
+        "password": "",
+    },
+    "s3": {
+        "endpoint": "",
+        "region": "auto",
+        "bucket": "",
+        "access_key_id": "",
+        "secret_access_key": "",
+    },
 }
 
 
@@ -58,9 +81,13 @@ def _normalize_backup_include(value: object) -> dict[str, bool]:
 
 def _normalize_backup_settings(value: object) -> dict[str, object]:
     source = value if isinstance(value, dict) else {}
+    webdav = source.get("webdav") if isinstance(source.get("webdav"), dict) else {}
+    provider = str(source.get("provider") or "cloudflare_r2").strip().lower()
+    if provider not in {"cloudflare_r2", "webdav"}:
+        provider = "cloudflare_r2"
     return {
         "enabled": _normalize_bool(source.get("enabled"), False),
-        "provider": "cloudflare_r2",
+        "provider": provider,
         "account_id": str(source.get("account_id") or "").strip(),
         "access_key_id": str(source.get("access_key_id") or "").strip(),
         "secret_access_key": str(source.get("secret_access_key") or "").strip(),
@@ -71,7 +98,29 @@ def _normalize_backup_settings(value: object) -> dict[str, object]:
         "encrypt": _normalize_bool(source.get("encrypt"), False),
         "passphrase": str(source.get("passphrase") or "").strip(),
         "include": _normalize_backup_include(source.get("include")),
+        "webdav": {
+            "url": str(webdav.get("url") or "").strip().rstrip("/"),
+            "username": str(webdav.get("username") or "").strip(),
+            "password": str(webdav.get("password") or "").strip(),
+        },
     }
+
+
+def _preserve_masked_backup_secret(incoming: object, current: object) -> object:
+    if not isinstance(incoming, dict):
+        return incoming
+    current_settings = _normalize_backup_settings(current)
+    next_settings = dict(incoming)
+    webdav = dict(next_settings.get("webdav") if isinstance(next_settings.get("webdav"), dict) else {})
+    current_webdav = current_settings.get("webdav") if isinstance(current_settings.get("webdav"), dict) else {}
+    if str(next_settings.get("secret_access_key") or "").strip() == "********":
+        next_settings["secret_access_key"] = str(current_settings.get("secret_access_key") or "")
+    if str(next_settings.get("passphrase") or "").strip() == "********":
+        next_settings["passphrase"] = str(current_settings.get("passphrase") or "")
+    if str(webdav.get("password") or "").strip() == "********":
+        webdav["password"] = str(current_webdav.get("password") or "")
+    next_settings["webdav"] = webdav
+    return next_settings
 
 
 def _normalize_backup_state(value: object) -> dict[str, object]:
@@ -83,6 +132,52 @@ def _normalize_backup_state(value: object) -> dict[str, object]:
         "last_error": str(source.get("last_error") or "").strip() or None,
         "last_object_key": str(source.get("last_object_key") or "").strip() or None,
     }
+
+
+def _normalize_remote_storage_settings(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    webdav = source.get("webdav") if isinstance(source.get("webdav"), dict) else {}
+    s3 = source.get("s3") if isinstance(source.get("s3"), dict) else {}
+    provider = str(source.get("provider") or "local").strip().lower()
+    if provider not in {"local", "webdav", "s3"}:
+        provider = "local"
+    return {
+        "enabled": _normalize_bool(source.get("enabled"), False),
+        "provider": provider,
+        "path_prefix": str(source.get("path_prefix") or "images").strip().strip("/") or "images",
+        "public_base_url": str(source.get("public_base_url") or "").strip().rstrip("/"),
+        "delete_local_after_upload": _normalize_bool(source.get("delete_local_after_upload"), False),
+        "webdav": {
+            "url": str(webdav.get("url") or "").strip().rstrip("/"),
+            "username": str(webdav.get("username") or "").strip(),
+            "password": str(webdav.get("password") or "").strip(),
+        },
+        "s3": {
+            "endpoint": str(s3.get("endpoint") or "").strip().rstrip("/"),
+            "region": str(s3.get("region") or "auto").strip() or "auto",
+            "bucket": str(s3.get("bucket") or "").strip(),
+            "access_key_id": str(s3.get("access_key_id") or "").strip(),
+            "secret_access_key": str(s3.get("secret_access_key") or "").strip(),
+        },
+    }
+
+
+def _preserve_masked_remote_storage_secret(incoming: object, current: object) -> object:
+    if not isinstance(incoming, dict):
+        return incoming
+    current_settings = _normalize_remote_storage_settings(current)
+    next_settings = dict(incoming)
+    webdav = dict(next_settings.get("webdav") if isinstance(next_settings.get("webdav"), dict) else {})
+    s3 = dict(next_settings.get("s3") if isinstance(next_settings.get("s3"), dict) else {})
+    current_webdav = current_settings.get("webdav") if isinstance(current_settings.get("webdav"), dict) else {}
+    current_s3 = current_settings.get("s3") if isinstance(current_settings.get("s3"), dict) else {}
+    if str(webdav.get("password") or "").strip() == "********":
+        webdav["password"] = str(current_webdav.get("password") or "")
+    if str(s3.get("secret_access_key") or "").strip() == "********":
+        s3["secret_access_key"] = str(current_s3.get("secret_access_key") or "")
+    next_settings["webdav"] = webdav
+    next_settings["s3"] = s3
+    return next_settings
 
 
 @dataclass(frozen=True)
@@ -320,6 +415,129 @@ class ConfigStore:
         ).strip().rstrip("/")
 
     @property
+    def site_name(self) -> str:
+        return str(self.data.get("site_name") or "ChatGPT2API").strip() or "ChatGPT2API"
+
+    @property
+    def browser_title(self) -> str:
+        return str(self.data.get("browser_title") or self.site_name).strip() or self.site_name
+
+    def get_qq_oauth_settings(self, *, mask_secret: bool = False) -> dict[str, object]:
+        source = self.data.get("qq_oauth") if isinstance(self.data.get("qq_oauth"), dict) else {}
+        app_key = str(source.get("app_key") or "").strip()
+        return {
+            "app_id": str(source.get("app_id") or "").strip(),
+            "app_key": "********" if mask_secret and app_key else app_key,
+            "new_user_free_quota": _normalize_positive_int(source.get("new_user_free_quota"), 0),
+            "invite_reward_quota": _normalize_positive_int(source.get("invite_reward_quota"), 5),
+        }
+
+    def get_admin_profile(self) -> dict[str, object]:
+        source = self.data.get("admin_profile") if isinstance(self.data.get("admin_profile"), dict) else {}
+        return {
+            "qq": str(source.get("qq") or "").strip(),
+            "qq_bound_at": str(source.get("qq_bound_at") or "").strip() or None,
+        }
+
+    def bind_admin_qq(self, qq: str) -> dict[str, object]:
+        normalized_qq = str(qq or "").strip()
+        next_data = dict(self.data)
+        next_data["admin_profile"] = {
+            "qq": normalized_qq,
+            "qq_bound_at": datetime.now(timezone.utc).isoformat() if normalized_qq else None,
+        }
+        self.data = next_data
+        self._save()
+        return self.get_admin_profile()
+
+    def create_qq_oauth_state(self, identity: dict[str, object] | None = None, *, purpose: str = "bind", invite_code: str = "") -> str:
+        now = int(time.time())
+        source = self.data.get("qq_oauth_states") if isinstance(self.data.get("qq_oauth_states"), dict) else {}
+        states = {
+            str(key): value
+            for key, value in source.items()
+            if isinstance(value, dict) and now - int(value.get("created_at") or 0) <= 900
+        }
+        source_identity = identity or {}
+        state = secrets.token_urlsafe(24)
+        states[state] = {
+            "purpose": str(purpose or "bind").strip() or "bind",
+            "identity_id": str(source_identity.get("id") or "").strip(),
+            "name": str(source_identity.get("name") or "").strip(),
+            "role": str(source_identity.get("role") or "").strip(),
+            "invite_code": str(invite_code or "").strip(),
+            "created_at": now,
+        }
+        next_data = dict(self.data)
+        next_data["qq_oauth_states"] = states
+        self.data = next_data
+        self._save()
+        return state
+
+    def consume_qq_oauth_state(self, state: str) -> dict[str, object] | None:
+        normalized_state = str(state or "").strip()
+        now = int(time.time())
+        source = self.data.get("qq_oauth_states") if isinstance(self.data.get("qq_oauth_states"), dict) else {}
+        states = {
+            str(key): value
+            for key, value in source.items()
+            if isinstance(value, dict) and now - int(value.get("created_at") or 0) <= 900
+        }
+        item = states.pop(normalized_state, None)
+        next_data = dict(self.data)
+        next_data["qq_oauth_states"] = states
+        self.data = next_data
+        self._save()
+        return item if isinstance(item, dict) else None
+
+    def create_qq_login_session(self, identity: dict[str, object]) -> str:
+        now = int(time.time())
+        source = self.data.get("qq_login_sessions") if isinstance(self.data.get("qq_login_sessions"), dict) else {}
+        sessions = {
+            str(key): value
+            for key, value in source.items()
+            if isinstance(value, dict) and now - int(value.get("created_at") or 0) <= 60 * 60 * 24 * 30
+        }
+        token = "qq-" + secrets.token_urlsafe(32)
+        sessions[token] = {
+            "id": str(identity.get("id") or "").strip(),
+            "name": str(identity.get("name") or "").strip(),
+            "role": str(identity.get("role") or "").strip(),
+            "created_at": now,
+        }
+        next_data = dict(self.data)
+        next_data["qq_login_sessions"] = sessions
+        self.data = next_data
+        self._save()
+        return token
+
+    def get_qq_login_identity(self, token: str) -> dict[str, object] | None:
+        normalized_token = str(token or "").strip()
+        now = int(time.time())
+        source = self.data.get("qq_login_sessions") if isinstance(self.data.get("qq_login_sessions"), dict) else {}
+        sessions = {
+            str(key): value
+            for key, value in source.items()
+            if isinstance(value, dict) and now - int(value.get("created_at") or 0) <= 60 * 60 * 24 * 30
+        }
+        if len(sessions) != len(source):
+            next_data = dict(self.data)
+            next_data["qq_login_sessions"] = sessions
+            self.data = next_data
+            self._save()
+        item = sessions.get(normalized_token)
+        if not isinstance(item, dict):
+            return None
+        role = str(item.get("role") or "").strip()
+        if role not in {"admin", "user"}:
+            return None
+        return {
+            "id": str(item.get("id") or "").strip(),
+            "name": str(item.get("name") or "").strip() or ("管理员" if role == "admin" else "普通用户"),
+            "role": role,
+        }
+
+    @property
     def app_version(self) -> str:
         try:
             value = VERSION_FILE.read_text(encoding="utf-8").strip()
@@ -341,7 +559,12 @@ class ConfigStore:
         data["sensitive_words"] = self.sensitive_words
         data["ai_review"] = self.ai_review
         data["global_system_prompt"] = self.global_system_prompt
+        data["site_name"] = self.site_name
+        data["browser_title"] = self.browser_title
+        data["qq_oauth"] = self.get_qq_oauth_settings(mask_secret=True)
+        data["admin_profile"] = self.get_admin_profile()
         data["backup"] = self.get_backup_settings()
+        data["remote_storage"] = self.get_remote_storage_settings(mask_secret=True)
         data.pop("auth-key", None)
         return data
 
@@ -352,7 +575,29 @@ class ConfigStore:
         next_data = dict(self.data)
         next_data.update(dict(data or {}))
         if "backup" in next_data:
-            next_data["backup"] = _normalize_backup_settings(next_data.get("backup"))
+            incoming_backup = _preserve_masked_backup_secret(next_data.get("backup"), self.data.get("backup"))
+            next_data["backup"] = _normalize_backup_settings(incoming_backup)
+        if "remote_storage" in next_data:
+            incoming_remote_storage = _preserve_masked_remote_storage_secret(
+                next_data.get("remote_storage"),
+                self.data.get("remote_storage"),
+            )
+            next_data["remote_storage"] = _normalize_remote_storage_settings(incoming_remote_storage)
+        if "qq_oauth" in next_data:
+            incoming_qq = dict(next_data.get("qq_oauth") if isinstance(next_data.get("qq_oauth"), dict) else {})
+            current_qq = self.get_qq_oauth_settings()
+            if str(incoming_qq.get("app_key") or "").strip() == "********":
+                incoming_qq["app_key"] = str(current_qq.get("app_key") or "")
+            next_data["qq_oauth"] = {
+                "app_id": str(incoming_qq.get("app_id") or "").strip(),
+                "app_key": str(incoming_qq.get("app_key") or "").strip(),
+                "new_user_free_quota": _normalize_positive_int(incoming_qq.get("new_user_free_quota"), 0),
+                "invite_reward_quota": _normalize_positive_int(incoming_qq.get("invite_reward_quota"), 5),
+            }
+        if "qq_oauth_states" in next_data:
+            next_data["qq_oauth_states"] = self.data.get("qq_oauth_states") if isinstance(self.data.get("qq_oauth_states"), dict) else {}
+        if "qq_login_sessions" in next_data:
+            next_data["qq_login_sessions"] = self.data.get("qq_login_sessions") if isinstance(self.data.get("qq_login_sessions"), dict) else {}
         next_data.pop("backup_state", None)
         self.data = next_data
         self._save()
@@ -360,6 +605,17 @@ class ConfigStore:
 
     def get_backup_settings(self) -> dict[str, object]:
         return _normalize_backup_settings(self.data.get("backup"))
+
+    def get_remote_storage_settings(self, *, mask_secret: bool = False) -> dict[str, object]:
+        settings = _normalize_remote_storage_settings(self.data.get("remote_storage"))
+        if mask_secret:
+            webdav = dict(settings.get("webdav") or {})
+            s3 = dict(settings.get("s3") or {})
+            webdav["password"] = "********" if str(webdav.get("password") or "").strip() else ""
+            s3["secret_access_key"] = "********" if str(s3.get("secret_access_key") or "").strip() else ""
+            settings["webdav"] = webdav
+            settings["s3"] = s3
+        return settings
 
     def get_storage_backend(self) -> StorageBackend:
         """获取存储后端实例（单例）"""

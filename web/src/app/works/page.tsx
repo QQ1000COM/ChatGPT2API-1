@@ -9,6 +9,7 @@ import {
   LoaderCircle,
   RefreshCw,
   Share2,
+  Star,
   Sparkles,
   Trash2,
   X,
@@ -29,10 +30,14 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   deleteManagedImages,
   downloadSingleImage,
+  createImageShare,
   fetchMyWorks,
+  fetchMyFeedback,
   getMyPublishedBatch,
   publishGalleryItem,
+  saveMyFeedback,
   type ManagedImage,
+  type ImageFeedback,
 } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
@@ -64,6 +69,8 @@ function WorksPageContent() {
   const [items, setItems] = useState<ManagedImage[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [focused, setFocused] = useState<ManagedImage | null>(null);
+  const [feedback, setFeedback] = useState<Map<string, ImageFeedback>>(() => new Map());
+  const [noteDraft, setNoteDraft] = useState("");
 
   // Pinterest 风格 masonry：列宽 flex-1 边到边等分容器（不留白），列数随容器宽度走。
   //   - 列数 = round((容器宽 + gap) / (目标列宽 240 + gap))
@@ -125,6 +132,11 @@ function WorksPageContent() {
     try {
       const resp = await fetchMyWorks();
       setItems(resp.items);
+      fetchMyFeedback()
+        .then((data) => {
+          setFeedback(new Map((data.items || []).map((item) => [item.image_rel, item])));
+        })
+        .catch(() => undefined);
       // 播种 publishStates：刷新页面后 publishStates Map 会被重置为空，
       // 已发布角标会丢。reload 时一次性问后端"这批 rel 我发过哪些"，
       // 把命中的写回 state，避免逐张发单条 /api/gallery/published 撑爆并发数。
@@ -206,6 +218,42 @@ function WorksPageContent() {
     } catch (error) {
       const message = error instanceof Error ? error.message : "下载失败";
       toast.error(message);
+    }
+  }, []);
+
+  const handleFeedback = useCallback(async (item: ManagedImage, updates: Partial<ImageFeedback>) => {
+    const rel = item.rel || item.path;
+    if (!rel) return;
+    const current = feedback.get(rel);
+    const next = {
+      image_rel: rel,
+      favorite: Boolean(updates.favorite ?? current?.favorite),
+      rating: Number(updates.rating ?? current?.rating ?? 0),
+      note: String(updates.note ?? current?.note ?? ""),
+      template_id: String(updates.template_id ?? current?.template_id ?? ""),
+    };
+    try {
+      const data = await saveMyFeedback(next);
+      setFeedback((prev) => new Map(prev).set(rel, data.item));
+      toast.success("评价已保存");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存评价失败");
+    }
+  }, [feedback]);
+
+  const handleCreateShare = useCallback(async (item: ManagedImage) => {
+    try {
+      const data = await createImageShare({
+        image_rel: item.rel || item.path,
+        image_url: item.url,
+        title: item.name || "图片分享",
+        prompt: item.prompt || "",
+      });
+      const url = `${window.location.origin}/share/${data.item.token}`;
+      await navigator.clipboard.writeText(url);
+      toast.success("分享链接已复制");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "创建分享失败");
     }
   }, []);
 
@@ -313,8 +361,14 @@ function WorksPageContent() {
     if (focused) setLastFocused(focused);
   }, [focused]);
   const focusedView = focused ?? lastFocused;
+  useEffect(() => {
+    if (!focusedView) return;
+    const rel = focusedView.rel || focusedView.path || "";
+    setNoteDraft(feedback.get(rel)?.note || "");
+  }, [focusedView, feedback]);
 
   const focusedPublishState = focused ? publishStates.get(imageKey(focused)) : undefined;
+  const focusedFeedback = focusedView ? feedback.get(focusedView.rel || focusedView.path || "") : undefined;
 
   return (
     <>
@@ -536,9 +590,47 @@ function WorksPageContent() {
                   ) : null}
                 </div>
 
+                <div className="rounded-xl border border-stone-200 bg-white p-3">
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-xs font-bold text-stone-700">评分与收藏</div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-8 rounded-full px-3 text-xs"
+                      onClick={() => void handleFeedback(focusedView, { favorite: !focusedFeedback?.favorite })}
+                    >
+                      <Star className={`size-3.5 ${focusedFeedback?.favorite ? "fill-amber-400 text-amber-500" : ""}`} />
+                      {focusedFeedback?.favorite ? "已收藏" : "收藏"}
+                    </Button>
+                  </div>
+                  <div className="mb-2 flex gap-1">
+                    {[1, 2, 3, 4, 5].map((score) => (
+                      <button
+                        key={score}
+                        type="button"
+                        className="grid size-8 place-items-center rounded-full hover:bg-stone-100"
+                        onClick={() => void handleFeedback(focusedView, { rating: score })}
+                      >
+                        <Star className={`size-4 ${Number(focusedFeedback?.rating || 0) >= score ? "fill-amber-400 text-amber-500" : "text-stone-300"}`} />
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      value={noteDraft}
+                      onChange={(event) => setNoteDraft(event.target.value)}
+                      placeholder="备注这张图的用途或修改意见"
+                      className="h-9 flex-1 rounded-xl border border-stone-200 px-3 text-xs outline-none"
+                    />
+                    <Button type="button" variant="outline" className="h-9 rounded-xl text-xs" onClick={() => void handleFeedback(focusedView, { note: noteDraft })}>
+                      保存
+                    </Button>
+                  </div>
+                </div>
+
                 {/* 底部 3 主 CTA 等分宽度，永远不换行；
                     下载/删除已移到图片右上角悬浮按钮。 */}
-                <div className="mt-2 grid grid-cols-3 gap-2">
+                <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
                   <Button
                     onClick={() => handleRedraw(focusedView)}
                     className="h-10 w-full rounded-xl bg-stone-950 px-3 text-white hover:bg-stone-800"
@@ -567,6 +659,14 @@ function WorksPageContent() {
                       <Share2 className="size-4" />
                     )}
                     {focusedPublishState === "published" ? "已发布" : "发布到画廊"}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="h-10 w-full rounded-xl border-stone-200 bg-white px-3"
+                    onClick={() => void handleCreateShare(focusedView)}
+                  >
+                    <Share2 className="size-4" />
+                    分享链接
                   </Button>
                 </div>
               </div>

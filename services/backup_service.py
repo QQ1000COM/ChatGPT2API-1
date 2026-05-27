@@ -6,17 +6,21 @@ import io
 import json
 import os
 import random
+import shutil
 import subprocess
 import tarfile
 import threading
+import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, unquote, urlencode, urlsplit
 
 from curl_cffi import requests
 
 from services.config import BASE_DIR, CONFIG_FILE, DATA_DIR, config, load_backup_state, save_backup_state
+from services.image_conversation_service import CONVERSATIONS_FILE
 from services.image_tags_service import TAGS_FILE
+from services.remote_image_index_service import REMOTE_IMAGE_INDEX_FILE
 
 
 def _utc_now() -> datetime:
@@ -299,6 +303,119 @@ class CloudflareR2Client:
         self.session.close()
 
 
+class WebDAVBackupClient:
+    def __init__(self, settings: dict[str, object]) -> None:
+        webdav = settings.get("webdav") if isinstance(settings.get("webdav"), dict) else {}
+        self.base_url = _clean(webdav.get("url")).rstrip("/")
+        self.username = _clean(webdav.get("username"))
+        self.password = _clean(webdav.get("password"))
+        self.prefix = _clean(settings.get("prefix")) or "backups"
+        self.session = requests.Session(impersonate="chrome", verify=True)
+
+    def validate(self) -> None:
+        missing = []
+        if not self.base_url:
+            missing.append("WebDAV 地址")
+        if not self.username:
+            missing.append("账号")
+        if not self.password:
+            missing.append("密码")
+        if missing:
+            raise BackupError("WebDAV 配置不完整：缺少 " + "、".join(missing))
+
+    def _url(self, key: str = "") -> str:
+        path = quote(key.strip("/"), safe="/")
+        return f"{self.base_url}/{path}" if path else self.base_url
+
+    def _request(self, method: str, key: str = "", **kwargs):
+        self.validate()
+        return self.session.request(
+            method,
+            self._url(key),
+            auth=(self.username, self.password),
+            timeout=kwargs.pop("timeout", 60.0),
+            **kwargs,
+        )
+
+    def _ensure_dirs(self, key: str) -> None:
+        current = ""
+        for part in [item for item in key.strip("/").split("/")[:-1] if item]:
+            current = f"{current}/{part}".strip("/")
+            response = self._request("MKCOL", current, timeout=15.0)
+            if response.status_code not in {200, 201, 204, 405}:
+                raise BackupError(f"创建 WebDAV 目录失败：HTTP {response.status_code}")
+
+    def test_connection(self) -> dict[str, object]:
+        response = self._request("PROPFIND", "", headers={"Depth": "0"}, timeout=30.0)
+        if response.status_code >= 400:
+            raise BackupError(f"连接 WebDAV 失败：HTTP {response.status_code}")
+        return {"ok": True, "status": int(response.status_code), "provider": "webdav"}
+
+    def upload_bytes(self, key: str, payload: bytes, *, content_type: str, metadata: dict[str, str] | None = None) -> dict[str, object]:
+        self._ensure_dirs(key)
+        response = self._request("PUT", key, data=payload, headers={"Content-Type": content_type}, timeout=120.0)
+        if response.status_code >= 400:
+            raise BackupError(f"上传 WebDAV 备份失败：HTTP {response.status_code}")
+        return {"key": key, "etag": str(response.headers.get("etag") or "").strip('"')}
+
+    def delete_object(self, key: str) -> None:
+        response = self._request("DELETE", key, timeout=30.0)
+        if response.status_code >= 400 and response.status_code != 404:
+            raise BackupError(f"删除 WebDAV 备份失败：HTTP {response.status_code}")
+
+    def download_bytes(self, key: str) -> bytes:
+        response = self._request("GET", key, timeout=120.0)
+        if response.status_code >= 400:
+            raise BackupError(f"读取 WebDAV 备份失败：HTTP {response.status_code}")
+        return bytes(response.content or b"")
+
+    def list_objects(self) -> list[dict[str, object]]:
+        prefix = self.prefix.strip("/")
+        response = self._request("PROPFIND", prefix, headers={"Depth": "1"}, timeout=60.0)
+        if response.status_code == 404:
+            return []
+        if response.status_code >= 400:
+            raise BackupError(f"获取 WebDAV 备份列表失败：HTTP {response.status_code}")
+        items: list[dict[str, object]] = []
+        try:
+            root = ET.fromstring(response.content)
+        except ET.ParseError as exc:
+            raise BackupError("解析 WebDAV 备份列表失败") from exc
+        base_path = urlsplit(self._url(prefix)).path.rstrip("/") + "/"
+        for response_node in root.findall("{DAV:}response"):
+            href_node = response_node.find("{DAV:}href")
+            if href_node is None or not href_node.text:
+                continue
+            href_path = unquote(urlsplit(href_node.text).path)
+            if href_path.rstrip("/") == base_path.rstrip("/"):
+                continue
+            name = href_path.rstrip("/").rsplit("/", 1)[-1]
+            if not name:
+                continue
+            key = f"{prefix}/{name}" if prefix else name
+            prop = response_node.find(".//{DAV:}prop")
+            size_text = ""
+            updated = ""
+            if prop is not None:
+                size_node = prop.find("{DAV:}getcontentlength")
+                modified_node = prop.find("{DAV:}getlastmodified")
+                size_text = size_node.text if size_node is not None and size_node.text else "0"
+                updated = modified_node.text if modified_node is not None and modified_node.text else ""
+            items.append({"key": key, "size": int(size_text or 0), "updated_at": updated})
+        items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        return items
+
+    def close(self) -> None:
+        self.session.close()
+
+
+def _backup_client(settings: dict[str, object]):
+    provider = _clean(settings.get("provider")).lower()
+    if provider == "webdav":
+        return WebDAVBackupClient(settings)
+    return CloudflareR2Client(settings)
+
+
 class BackupService:
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -357,6 +474,13 @@ class BackupService:
 
     def is_configured(self) -> bool:
         settings = config.get_backup_settings()
+        if _clean(settings.get("provider")).lower() == "webdav":
+            webdav = settings.get("webdav") if isinstance(settings.get("webdav"), dict) else {}
+            return all([
+                _clean(webdav.get("url")),
+                _clean(webdav.get("username")),
+                _clean(webdav.get("password")),
+            ])
         return all([
             _clean(settings.get("account_id")),
             _clean(settings.get("access_key_id")),
@@ -368,6 +492,9 @@ class BackupService:
         settings = dict(config.get_backup_settings())
         settings["secret_access_key"] = "********" if _clean(settings.get("secret_access_key")) else ""
         settings["passphrase"] = "********" if _clean(settings.get("passphrase")) else ""
+        webdav = dict(settings.get("webdav") if isinstance(settings.get("webdav"), dict) else {})
+        webdav["password"] = "********" if _clean(webdav.get("password")) else ""
+        settings["webdav"] = webdav
         return settings
 
     def update_settings(self, payload: dict[str, object]) -> dict[str, object]:
@@ -386,7 +513,7 @@ class BackupService:
         return dict(updated.get("backup") or {})
 
     def test_connection(self) -> dict[str, object]:
-        client = CloudflareR2Client(config.get_backup_settings())
+        client = _backup_client(config.get_backup_settings())
         try:
             return client.test_connection()
         finally:
@@ -395,7 +522,7 @@ class BackupService:
     def list_backups(self) -> list[dict[str, object]]:
         if not self.is_configured():
             return []
-        client = CloudflareR2Client(config.get_backup_settings())
+        client = _backup_client(config.get_backup_settings())
         try:
             items = client.list_objects()
         finally:
@@ -418,7 +545,7 @@ class BackupService:
         candidate = _clean(key)
         if not candidate:
             raise BackupError("备份对象 key 不能为空")
-        client = CloudflareR2Client(config.get_backup_settings())
+        client = _backup_client(config.get_backup_settings())
         try:
             client.delete_object(candidate)
         finally:
@@ -428,7 +555,7 @@ class BackupService:
         candidate = _clean(key)
         if not candidate:
             raise BackupError("备份对象 key 不能为空")
-        client = CloudflareR2Client(config.get_backup_settings())
+        client = _backup_client(config.get_backup_settings())
         try:
             payload = client.download_bytes(candidate)
         finally:
@@ -453,7 +580,7 @@ class BackupService:
         candidate = _clean(key)
         if not candidate:
             raise BackupError("备份对象 key 不能为空")
-        client = CloudflareR2Client(config.get_backup_settings())
+        client = _backup_client(config.get_backup_settings())
         try:
             payload = client.download_bytes(candidate)
         finally:
@@ -463,6 +590,32 @@ class BackupService:
         detail["name"] = candidate.rsplit("/", 1)[-1]
         detail["encrypted"] = candidate.endswith(".enc")
         return detail
+
+    def restore_backup(self, key: str) -> dict[str, object]:
+        candidate = _clean(key)
+        if not candidate:
+            raise BackupError("备份对象 key 不能为空")
+        client = _backup_client(config.get_backup_settings())
+        try:
+            payload = client.download_bytes(candidate)
+        finally:
+            client.close()
+        if candidate.endswith(".enc"):
+            passphrase = _clean(config.get_backup_settings().get("passphrase"))
+            if not passphrase:
+                raise BackupError("当前未配置加密口令，无法恢复已加密备份")
+            payload = _openssl_decrypt(payload, passphrase)
+        return self._restore_archive(payload)
+
+    def restore_backup_payload(self, payload: bytes, filename: str = "") -> dict[str, object]:
+        name = _clean(filename)
+        decoded = bytes(payload or b"")
+        if name.endswith(".enc"):
+            passphrase = _clean(config.get_backup_settings().get("passphrase"))
+            if not passphrase:
+                raise BackupError("当前未配置加密口令，无法导入已加密备份")
+            decoded = _openssl_decrypt(decoded, passphrase)
+        return self._restore_archive(decoded)
 
     def run_backup(self, *, trigger: str = "manual") -> dict[str, object]:
         with self._lock:
@@ -502,7 +655,7 @@ class BackupService:
 
     def _run_backup_once(self, *, trigger: str) -> dict[str, object]:
         settings = config.get_backup_settings()
-        client = CloudflareR2Client(settings)
+        client = _backup_client(settings)
         client.validate()
         payload_raw = self._build_backup_archive(settings, trigger=trigger)
         encrypted = bool(settings.get("encrypt"))
@@ -631,6 +784,9 @@ class BackupService:
                 self._add_file_to_archive(archive, DATA_DIR / "logs.jsonl", "data/logs.jsonl")
             if include.get("image_tasks"):
                 self._add_file_to_archive(archive, DATA_DIR / "image_tasks.json", "data/image_tasks.json")
+            if include.get("image_conversations"):
+                self._add_file_to_archive(archive, CONVERSATIONS_FILE, "data/image_conversations.json")
+                self._add_file_to_archive(archive, REMOTE_IMAGE_INDEX_FILE, "data/remote_images.json")
             if include.get("accounts_snapshot"):
                 self._add_bytes_to_archive(
                     archive,
@@ -647,6 +803,77 @@ class BackupService:
                 self._add_file_to_archive(archive, TAGS_FILE, "data/image_tags.json")
                 self._add_directory_to_archive(archive, config.images_dir, "data/images")
         return buffer.getvalue()
+
+    def _restore_archive(self, payload: bytes) -> dict[str, object]:
+        restored: list[str] = []
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+            members = [member for member in archive.getmembers() if member.isfile()]
+            member_map = {member.name: member for member in members}
+
+            def read_member(name: str) -> bytes | None:
+                member = member_map.get(name)
+                if member is None:
+                    return None
+                extracted = archive.extractfile(member)
+                return extracted.read() if extracted is not None else None
+
+            file_targets = {
+                "config.json": CONFIG_FILE,
+                "data/register.json": DATA_DIR / "register.json",
+                "data/cpa_config.json": DATA_DIR / "cpa_config.json",
+                "data/sub2api_config.json": DATA_DIR / "sub2api_config.json",
+                "data/logs.jsonl": DATA_DIR / "logs.jsonl",
+                "data/image_tasks.json": DATA_DIR / "image_tasks.json",
+                "data/image_tags.json": TAGS_FILE,
+                "data/image_conversations.json": CONVERSATIONS_FILE,
+                "data/remote_images.json": REMOTE_IMAGE_INDEX_FILE,
+            }
+            for name, target in file_targets.items():
+                raw = read_member(name)
+                if raw is None:
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(raw)
+                restored.append(name)
+
+            accounts_raw = read_member("snapshots/accounts.json")
+            if accounts_raw:
+                accounts = json.loads(accounts_raw.decode("utf-8"))
+                if isinstance(accounts, list):
+                    config.get_storage_backend().save_accounts(accounts)
+                    restored.append("snapshots/accounts.json")
+
+            auth_keys_raw = read_member("snapshots/auth_keys.json")
+            if auth_keys_raw:
+                auth_keys = json.loads(auth_keys_raw.decode("utf-8"))
+                if isinstance(auth_keys, list):
+                    config.get_storage_backend().save_auth_keys(auth_keys)
+                    restored.append("snapshots/auth_keys.json")
+
+            image_members = [member for member in members if member.name.startswith("data/images/")]
+            if image_members:
+                if config.images_dir.exists():
+                    shutil.rmtree(config.images_dir)
+                config.images_dir.mkdir(parents=True, exist_ok=True)
+                root = config.images_dir.resolve()
+                for member in image_members:
+                    relative = member.name.removeprefix("data/images/").strip("/")
+                    if not relative:
+                        continue
+                    target = (root / relative).resolve()
+                    try:
+                        target.relative_to(root)
+                    except ValueError:
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    extracted = archive.extractfile(member)
+                    if extracted is not None:
+                        target.write_bytes(extracted.read())
+                restored.append("data/images")
+        # 让后续读取使用恢复后的配置重新创建存储后端。
+        config.data = config._load()
+        config._storage_backend = None
+        return {"restored": restored, "count": len(restored)}
 
     def _add_bytes_to_archive(self, archive: tarfile.TarFile, name: str, payload: bytes) -> None:
         info = tarfile.TarInfo(name=name)

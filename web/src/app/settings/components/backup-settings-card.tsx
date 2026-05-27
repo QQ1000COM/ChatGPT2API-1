@@ -1,7 +1,7 @@
-"use client";
+﻿"use client";
 
-import { CloudUpload, Download, Eye, LoaderCircle, Play, RefreshCcw, Shield, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { CloudUpload, Download, Eye, LoaderCircle, Play, RefreshCcw, RotateCcw, Shield, Trash2 } from "lucide-react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -10,19 +10,16 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import webConfig from "@/constants/common-env";
 import { fetchBackupDetail, getBackupDownloadUrl, type BackupDetail, type BackupInclude } from "@/lib/api";
 import { getStoredAuthKey } from "@/store/auth";
 import { useSettingsStore } from "../store";
 
 function formatDateTime(value?: string | null) {
-  if (!value) {
-    return "—";
-  }
+  if (!value) return "-";
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
+  if (Number.isNaN(date.getTime())) return value;
   return new Intl.DateTimeFormat("zh-CN", {
     year: "numeric",
     month: "2-digit",
@@ -33,9 +30,7 @@ function formatDateTime(value?: string | null) {
 }
 
 function formatBytes(value: number) {
-  if (!Number.isFinite(value) || value <= 0) {
-    return "0 B";
-  }
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
   let size = value;
   let index = 0;
@@ -48,9 +43,7 @@ function formatBytes(value: number) {
 
 function getFilenameFromContentDisposition(value: string | null) {
   const header = String(value || "").trim();
-  if (!header) {
-    return "";
-  }
+  if (!header) return "";
   const utf8Match = header.match(/filename\*\s*=\s*UTF-8''([^;]+)/i);
   if (utf8Match?.[1]) {
     try {
@@ -59,8 +52,7 @@ function getFilenameFromContentDisposition(value: string | null) {
       return utf8Match[1];
     }
   }
-  const plainMatch = header.match(/filename\s*=\s*"?([^";]+)"?/i);
-  return plainMatch?.[1] || "";
+  return header.match(/filename\s*=\s*"?([^";]+)"?/i)?.[1] || "";
 }
 
 const includeLabels: Array<{ key: keyof BackupInclude; label: string }> = [
@@ -68,8 +60,9 @@ const includeLabels: Array<{ key: keyof BackupInclude; label: string }> = [
   { key: "register", label: "注册配置" },
   { key: "cpa", label: "CPA 配置" },
   { key: "sub2api", label: "Sub2API 配置" },
-  { key: "logs", label: "调度与调用日志" },
+  { key: "logs", label: "日志记录" },
   { key: "image_tasks", label: "图片任务记录" },
+  { key: "image_conversations", label: "画图对话记录" },
   { key: "accounts_snapshot", label: "账号快照" },
   { key: "auth_keys_snapshot", label: "用户密钥快照" },
   { key: "images", label: "图片文件目录" },
@@ -77,6 +70,7 @@ const includeLabels: Array<{ key: keyof BackupInclude; label: string }> = [
 
 export function BackupSettingsCard() {
   const [detailOpen, setDetailOpen] = useState(false);
+  const localBackupInputRef = useRef<HTMLInputElement>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detail, setDetail] = useState<BackupDetail | null>(null);
   const config = useSettingsStore((state) => state.config);
@@ -85,10 +79,13 @@ export function BackupSettingsCard() {
   const isLoadingConfig = useSettingsStore((state) => state.isLoadingConfig);
   const isLoadingBackups = useSettingsStore((state) => state.isLoadingBackups);
   const isRunningBackup = useSettingsStore((state) => state.isRunningBackup);
+  const isRestoringBackup = useSettingsStore((state) => state.isRestoringBackup);
   const deletingBackupKey = useSettingsStore((state) => state.deletingBackupKey);
   const isTestingBackup = useSettingsStore((state) => state.isTestingBackup);
   const loadBackups = useSettingsStore((state) => state.loadBackups);
   const runBackup = useSettingsStore((state) => state.runBackup);
+  const restoreBackupFromRemote = useSettingsStore((state) => state.restoreBackupFromRemote);
+  const importBackupFromFile = useSettingsStore((state) => state.importBackupFromFile);
   const removeBackup = useSettingsStore((state) => state.removeBackup);
   const testBackup = useSettingsStore((state) => state.testBackup);
   const setBackupField = useSettingsStore((state) => state.setBackupField);
@@ -105,9 +102,8 @@ export function BackupSettingsCard() {
   }
 
   const backup = config?.backup;
-  if (!backup) {
-    return null;
-  }
+  if (!backup) return null;
+  const provider = String(backup.provider || "cloudflare_r2");
 
   const handleOpenDetail = async (key: string) => {
     setDetailLoading(true);
@@ -126,31 +122,16 @@ export function BackupSettingsCard() {
   const handleDownload = async (key: string, name: string) => {
     try {
       const authKey = await getStoredAuthKey();
-      if (!authKey) {
-        toast.error("当前登录态已失效，请重新登录后再下载");
-        return;
-      }
+      if (!authKey) throw new Error("当前登录状态已失效，请重新登录后再下载");
       const response = await fetch(`${webConfig.apiUrl.replace(/\/$/, "")}${getBackupDownloadUrl(key)}`, {
-        headers: {
-          Authorization: `Bearer ${authKey}`,
-        },
+        headers: { Authorization: `Bearer ${authKey}` },
       });
-      if (!response.ok) {
-        let message = "下载备份失败";
-        try {
-          const data = await response.json() as { detail?: { error?: string }; error?: string; message?: string };
-          message = data.detail?.error || data.error || data.message || message;
-        } catch {
-          message = response.status === 401 ? "登录已失效，请重新登录后再试" : message;
-        }
-        throw new Error(message);
-      }
-      const downloadName = getFilenameFromContentDisposition(response.headers.get("Content-Disposition")) || name || "backup.bin";
+      if (!response.ok) throw new Error(response.status === 401 ? "登录已失效，请重新登录后再试" : "下载备份失败");
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = downloadName;
+      anchor.download = getFilenameFromContentDisposition(response.headers.get("Content-Disposition")) || name || "backup.bin";
       document.body.append(anchor);
       anchor.click();
       anchor.remove();
@@ -158,6 +139,24 @@ export function BackupSettingsCard() {
       toast.success("备份下载已开始");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "下载备份失败");
+    }
+  };
+
+  const handleRestore = (key: string) => {
+    const confirmed = window.confirm("导入备份会覆盖当前配置、账号快照和已包含的数据文件。建议先手动备份一次当前数据，确认继续吗？");
+    if (confirmed) {
+      void restoreBackupFromRemote(key);
+    }
+  };
+
+  const handleImportLocalBackup = (file: File | null | undefined) => {
+    if (!file) return;
+    const confirmed = window.confirm("导入本地备份会覆盖当前数据，确认继续吗？");
+    if (confirmed) {
+      void importBackupFromFile(file);
+    }
+    if (localBackupInputRef.current) {
+      localBackupInputRef.current.value = "";
     }
   };
 
@@ -171,154 +170,168 @@ export function BackupSettingsCard() {
                 <CloudUpload className="size-5 text-stone-600" />
               </div>
               <div>
-                <h2 className="text-lg font-semibold tracking-tight">R2 备份管理</h2>
-                <p className="text-sm text-stone-500">将关键数据定时备份到 Cloudflare R2，支持可选加密、轮替、手动执行与历史清理。</p>
+                <h2 className="text-lg font-semibold tracking-tight">备份与恢复</h2>
+                <p className="text-sm text-stone-500">支持备份到 Cloudflare R2 或 WebDAV，也可以从历史备份导入恢复。</p>
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              <Badge variant={backupState?.running ? "warning" : backupState?.last_status === "success" ? "success" : "secondary"} className="rounded-md">
-                {backupState?.running ? "备份中" : backupState?.last_status === "success" ? "最近成功" : backupState?.last_status === "error" ? "最近失败" : "未执行"}
-              </Badge>
-            </div>
-          </div>
-
-          <div className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm leading-6 text-stone-600">
-            账号与用户密钥会从当前存储后端导出逻辑快照，不依赖底层是 `json`、`sqlite`、`postgres` 还是 `git`。图片目录默认不备份，避免备份体积过大。
+            <Badge variant={backupState?.running ? "warning" : backupState?.last_status === "success" ? "success" : "secondary"} className="rounded-md">
+              {backupState?.running ? "备份中" : backupState?.last_status === "success" ? "最近成功" : backupState?.last_status === "error" ? "最近失败" : "未执行"}
+            </Badge>
           </div>
 
           <div className="grid gap-4 md:grid-cols-2">
             <label className="flex items-center gap-3 rounded-xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700">
-              <Checkbox
-                checked={Boolean(backup.enabled)}
-                onCheckedChange={(checked) => setBackupField("enabled", Boolean(checked))}
-              />
+              <Checkbox checked={Boolean(backup.enabled)} onCheckedChange={(checked) => setBackupField("enabled", Boolean(checked))} />
               启用定时备份
             </label>
             <label className="flex items-center gap-3 rounded-xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700">
-              <Checkbox
-                checked={Boolean(backup.encrypt)}
-                onCheckedChange={(checked) => setBackupField("encrypt", Boolean(checked))}
-              />
+              <Checkbox checked={Boolean(backup.encrypt)} onCheckedChange={(checked) => setBackupField("encrypt", Boolean(checked))} />
               启用备份加密
             </label>
 
-          <div className="space-y-2">
-            <label className="text-sm text-stone-700">Cloudflare Account ID</label>
-            <Input value={String(backup.account_id || "")} onChange={(event) => setBackupField("account_id", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" />
-          </div>
-          <div className="space-y-2">
-            <label className="text-sm text-stone-700">Bucket 名称</label>
-            <Input value={String(backup.bucket || "")} onChange={(event) => setBackupField("bucket", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" />
-          </div>
+            <div className="space-y-2">
+              <label className="text-sm text-stone-700">备份位置</label>
+              <Select value={provider} onValueChange={(value) => setBackupField("provider", value)}>
+                <SelectTrigger className="h-10 rounded-xl border-stone-200 bg-white">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="cloudflare_r2">Cloudflare R2</SelectItem>
+                  <SelectItem value="webdav">WebDAV</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm text-stone-700">备份目录</label>
+              <Input value={String(backup.prefix || "")} onChange={(event) => setBackupField("prefix", event.target.value)} placeholder="backups" className="h-10 rounded-xl border-stone-200 bg-white" />
+            </div>
 
-          <div className="space-y-2">
-            <label className="text-sm text-stone-700">Access Key ID</label>
-            <Input value={String(backup.access_key_id || "")} onChange={(event) => setBackupField("access_key_id", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" />
-          </div>
-          <div className="space-y-2">
-            <label className="text-sm text-stone-700">Secret Access Key</label>
-            <Input type="password" value={String(backup.secret_access_key || "")} onChange={(event) => setBackupField("secret_access_key", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" />
-          </div>
+            {provider === "webdav" ? (
+              <>
+                <div className="space-y-2 md:col-span-2">
+                  <label className="text-sm text-stone-700">WebDAV 地址</label>
+                  <Input value={String(backup.webdav?.url || "")} onChange={(event) => setBackupField("webdav", { ...(backup.webdav || {}), url: event.target.value })} placeholder="https://dav.example.com/remote.php/dav/files/user" className="h-10 rounded-xl border-stone-200 bg-white" />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm text-stone-700">账号</label>
+                  <Input value={String(backup.webdav?.username || "")} onChange={(event) => setBackupField("webdav", { ...(backup.webdav || {}), username: event.target.value })} className="h-10 rounded-xl border-stone-200 bg-white" />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm text-stone-700">密码</label>
+                  <Input type="password" value={String(backup.webdav?.password || "")} onChange={(event) => setBackupField("webdav", { ...(backup.webdav || {}), password: event.target.value })} className="h-10 rounded-xl border-stone-200 bg-white" />
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="space-y-2">
+                  <label className="text-sm text-stone-700">Cloudflare Account ID</label>
+                  <Input value={String(backup.account_id || "")} onChange={(event) => setBackupField("account_id", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm text-stone-700">Bucket 名称</label>
+                  <Input value={String(backup.bucket || "")} onChange={(event) => setBackupField("bucket", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm text-stone-700">Access Key ID</label>
+                  <Input value={String(backup.access_key_id || "")} onChange={(event) => setBackupField("access_key_id", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm text-stone-700">Secret Access Key</label>
+                  <Input type="password" value={String(backup.secret_access_key || "")} onChange={(event) => setBackupField("secret_access_key", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" />
+                </div>
+              </>
+            )}
 
-          <div className="space-y-2">
-            <label className="text-sm text-stone-700">备份前缀</label>
-            <Input value={String(backup.prefix || "")} onChange={(event) => setBackupField("prefix", event.target.value)} placeholder="backups" className="h-10 rounded-xl border-stone-200 bg-white" />
-            <p className="text-xs text-stone-500">R2 内对象前缀，例如 `backups/prod`。</p>
-          </div>
-          <div className="space-y-2">
-            <label className="text-sm text-stone-700">定时备份间隔</label>
-            <Input value={String(backup.interval_minutes || "")} onChange={(event) => setBackupField("interval_minutes", event.target.value)} placeholder="360" className="h-10 rounded-xl border-stone-200 bg-white" />
-            <p className="text-xs text-stone-500">单位分钟，服务启动后会按此间隔自动轮询执行。</p>
-          </div>
-
-          <div className="space-y-2">
-            <label className="text-sm text-stone-700">保留备份数量</label>
-            <Input value={String(backup.rotation_keep || "")} onChange={(event) => setBackupField("rotation_keep", event.target.value)} placeholder="10" className="h-10 rounded-xl border-stone-200 bg-white" />
-            <p className="text-xs text-stone-500">成功上传后自动删除更旧的备份。填 `0` 表示不自动轮替。</p>
-          </div>
-          <div className="space-y-2">
-            <label className="text-sm text-stone-700">加密口令</label>
-            <Input type="password" value={String(backup.passphrase || "")} onChange={(event) => setBackupField("passphrase", event.target.value)} placeholder={backup.encrypt ? "启用加密后必填" : "留空"} className="h-10 rounded-xl border-stone-200 bg-white" />
-            <p className="text-xs text-stone-500">仅在启用加密时使用。请妥善保管，否则无法解密备份内容。</p>
-          </div>
+            <div className="space-y-2">
+              <label className="text-sm text-stone-700">定时备份间隔</label>
+              <Input value={String(backup.interval_minutes || "")} onChange={(event) => setBackupField("interval_minutes", event.target.value)} placeholder="360" className="h-10 rounded-xl border-stone-200 bg-white" />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm text-stone-700">保留备份数量</label>
+              <Input value={String(backup.rotation_keep || "")} onChange={(event) => setBackupField("rotation_keep", event.target.value)} placeholder="10" className="h-10 rounded-xl border-stone-200 bg-white" />
+            </div>
+            <div className="space-y-2 md:col-span-2">
+              <label className="text-sm text-stone-700">加密口令</label>
+              <Input type="password" value={String(backup.passphrase || "")} onChange={(event) => setBackupField("passphrase", event.target.value)} placeholder={backup.encrypt ? "启用加密后必填" : "留空"} className="h-10 rounded-xl border-stone-200 bg-white" />
+            </div>
           </div>
 
           <div className="space-y-3 rounded-xl border border-stone-200 bg-white px-4 py-4">
-          <div>
-            <div className="text-sm font-medium text-stone-800">备份内容</div>
-            <p className="mt-1 text-xs text-stone-500">按组件勾选需要进入备份包的数据。</p>
-          </div>
-          <div className="grid gap-3 md:grid-cols-3">
-            {includeLabels.map((item) => (
-              <label key={item.key} className="flex items-center gap-3 text-sm text-stone-700">
-                <Checkbox
-                  checked={Boolean(backup.include[item.key])}
-                  onCheckedChange={(checked) => setBackupInclude(item.key, Boolean(checked))}
-                />
-                {item.label}
-              </label>
-            ))}
-          </div>
+            <div>
+              <div className="text-sm font-medium text-stone-800">备份内容</div>
+              <p className="mt-1 text-xs text-stone-500">画图对话记录已加入备份，图片文件目录默认不勾选，避免备份包过大。</p>
+            </div>
+            <div className="grid gap-3 md:grid-cols-3">
+              {includeLabels.map((item) => (
+                <label key={item.key} className="flex items-center gap-3 text-sm text-stone-700">
+                  <Checkbox checked={Boolean(backup.include[item.key])} onCheckedChange={(checked) => setBackupInclude(item.key, Boolean(checked))} />
+                  {item.label}
+                </label>
+              ))}
+            </div>
           </div>
 
           <div className="grid gap-3 rounded-xl border border-stone-200 bg-stone-50 px-4 py-4 text-sm text-stone-600 md:grid-cols-3">
-          <div>
-            <div className="text-xs text-stone-500">最近开始</div>
-            <div className="mt-1 font-medium text-stone-800">{formatDateTime(backupState?.last_started_at)}</div>
-          </div>
-          <div>
-            <div className="text-xs text-stone-500">最近完成</div>
-            <div className="mt-1 font-medium text-stone-800">{formatDateTime(backupState?.last_finished_at)}</div>
-          </div>
-          <div>
-            <div className="text-xs text-stone-500">最近对象</div>
-            <div className="mt-1 break-all font-medium text-stone-800">{backupState?.last_object_key || "—"}</div>
-          </div>
-          {backupState?.last_error ? (
-            <div className="md:col-span-3">
-              <div className="text-xs text-rose-500">最近错误</div>
-              <div className="mt-1 break-all rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-rose-700">{backupState.last_error}</div>
+            <div>
+              <div className="text-xs text-stone-500">最近开始</div>
+              <div className="mt-1 font-medium text-stone-800">{formatDateTime(backupState?.last_started_at)}</div>
             </div>
-          ) : null}
+            <div>
+              <div className="text-xs text-stone-500">最近完成</div>
+              <div className="mt-1 font-medium text-stone-800">{formatDateTime(backupState?.last_finished_at)}</div>
+            </div>
+            <div>
+              <div className="text-xs text-stone-500">最近对象</div>
+              <div className="mt-1 break-all font-medium text-stone-800">{backupState?.last_object_key || "-"}</div>
+            </div>
+            {backupState?.last_error ? (
+              <div className="md:col-span-3">
+                <div className="text-xs text-rose-500">最近错误</div>
+                <div className="mt-1 break-all rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-rose-700">{backupState.last_error}</div>
+              </div>
+            ) : null}
           </div>
 
           <div className="flex flex-wrap justify-end gap-2">
-          <Button type="button" variant="outline" className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700" onClick={() => void testBackup()} disabled={isTestingBackup}>
-            {isTestingBackup ? <LoaderCircle className="size-4 animate-spin" /> : <Shield className="size-4" />}
-            测试连接
-          </Button>
-          <Button type="button" variant="outline" className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700" onClick={() => void loadBackups()} disabled={isLoadingBackups}>
-            {isLoadingBackups ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCcw className="size-4" />}
-            刷新列表
-          </Button>
-          <Button type="button" variant="outline" className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700" onClick={() => void runBackup()} disabled={isRunningBackup || Boolean(backupState?.running)}>
-            {isRunningBackup || backupState?.running ? <LoaderCircle className="size-4 animate-spin" /> : <Play className="size-4" />}
-            立即备份
-          </Button>
-          {/* 「保存配置」按钮已移到设置页底部 FloatingSaveBar，避免每张卡尾巴一个保存按钮带来的"我改了三张卡到底点哪个保存"困惑 */}
+            <input
+              ref={localBackupInputRef}
+              type="file"
+              accept=".gz,.enc,.tar.gz,application/gzip,application/octet-stream"
+              className="hidden"
+              onChange={(event) => handleImportLocalBackup(event.target.files?.[0])}
+            />
+            <Button type="button" variant="outline" className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700" onClick={() => localBackupInputRef.current?.click()} disabled={isRestoringBackup}>
+              {isRestoringBackup ? <LoaderCircle className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
+              导入本地备份
+            </Button>
+            <Button type="button" variant="outline" className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700" onClick={() => void testBackup()} disabled={isTestingBackup}>
+              {isTestingBackup ? <LoaderCircle className="size-4 animate-spin" /> : <Shield className="size-4" />}
+              测试连接
+            </Button>
+            <Button type="button" variant="outline" className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700" onClick={() => void loadBackups()} disabled={isLoadingBackups}>
+              {isLoadingBackups ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCcw className="size-4" />}
+              刷新列表
+            </Button>
+            <Button type="button" variant="outline" className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700" onClick={() => void runBackup()} disabled={isRunningBackup || Boolean(backupState?.running)}>
+              {isRunningBackup || backupState?.running ? <LoaderCircle className="size-4 animate-spin" /> : <Play className="size-4" />}
+              立即备份
+            </Button>
           </div>
 
           <div className="space-y-3">
-          <div className="flex items-center justify-between gap-3">
             <div>
               <h3 className="text-sm font-medium text-stone-800">历史备份</h3>
-              <p className="text-xs text-stone-500">支持查看对象信息并直接删除远端备份。</p>
+              <p className="text-xs text-stone-500">可以查看、下载、删除，也可以导入恢复当前系统数据。</p>
             </div>
-          </div>
-
-          {isLoadingBackups ? (
-            <div className="flex items-center justify-center py-10">
-              <LoaderCircle className="size-5 animate-spin text-stone-400" />
-            </div>
-          ) : backups.length === 0 ? (
-            <div className="rounded-xl bg-stone-50 px-6 py-10 text-center text-sm text-stone-500">
-              暂无远端备份记录。保存配置并执行一次手动备份后会出现在这里。
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {backups.map((item) => {
-                const isDeleting = deletingBackupKey === item.key;
-                return (
+            {isLoadingBackups ? (
+              <div className="flex items-center justify-center py-10">
+                <LoaderCircle className="size-5 animate-spin text-stone-400" />
+              </div>
+            ) : backups.length === 0 ? (
+              <div className="rounded-xl bg-stone-50 px-6 py-10 text-center text-sm text-stone-500">暂无远程备份记录。</div>
+            ) : (
+              <div className="space-y-3">
+                {backups.map((item) => (
                   <div key={item.key} className="flex flex-col gap-3 rounded-xl border border-stone-200 bg-white px-4 py-4 md:flex-row md:items-center md:justify-between">
                     <div className="min-w-0 space-y-2">
                       <div className="flex flex-wrap items-center gap-2">
@@ -328,40 +341,31 @@ export function BackupSettingsCard() {
                       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-stone-500">
                         <span>大小 {formatBytes(item.size)}</span>
                         <span>更新时间 {formatDateTime(item.updated_at)}</span>
-                        <span className="break-all">对象 key {item.key}</span>
+                        <span className="break-all">key {item.key}</span>
                       </div>
                     </div>
-
-                    <div className="flex items-center gap-2">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700"
-                        onClick={() => void handleDownload(item.key, item.name)}
-                      >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button type="button" variant="outline" className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700" onClick={() => void handleDownload(item.key, item.name)}>
                         <Download className="size-4" />
                         下载
                       </Button>
                       <Button type="button" variant="outline" className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700" onClick={() => void handleOpenDetail(item.key)}>
                         <Eye className="size-4" />
-                        查看详情
+                        详情
                       </Button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        className="h-9 rounded-xl border-rose-200 bg-white px-4 text-rose-700"
-                        onClick={() => void removeBackup(item.key)}
-                        disabled={isDeleting}
-                      >
-                        {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+                      <Button type="button" variant="outline" className="h-9 rounded-xl border-amber-200 bg-white px-4 text-amber-700" onClick={() => handleRestore(item.key)} disabled={isRestoringBackup}>
+                        {isRestoringBackup ? <LoaderCircle className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
+                        导入恢复
+                      </Button>
+                      <Button type="button" variant="outline" className="h-9 rounded-xl border-rose-200 bg-white px-4 text-rose-700" onClick={() => void removeBackup(item.key)} disabled={deletingBackupKey === item.key}>
+                        {deletingBackupKey === item.key ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
                         删除
                       </Button>
                     </div>
                   </div>
-                );
-              })}
-            </div>
-          )}
+                ))}
+              </div>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -377,9 +381,7 @@ export function BackupSettingsCard() {
                 <LoaderCircle className="size-5 animate-spin text-stone-400" />
               </div>
             ) : !detail ? (
-              <div className="rounded-xl bg-stone-50 px-6 py-10 text-center text-sm text-stone-500">
-                暂时无法读取备份详情；如果这是加密备份，请确认当前已填写正确的加密口令并先保存配置。
-              </div>
+              <div className="rounded-xl bg-stone-50 px-6 py-10 text-center text-sm text-stone-500">暂时无法读取备份详情。</div>
             ) : (
               <>
                 <div className="grid gap-3 rounded-xl border border-stone-200 bg-stone-50 px-4 py-4 text-sm text-stone-600 md:grid-cols-2">
@@ -393,36 +395,27 @@ export function BackupSettingsCard() {
                   </div>
                   <div>
                     <div className="text-xs text-stone-500">触发方式</div>
-                    <div className="mt-1 font-medium text-stone-800">{detail.trigger || "—"}</div>
+                    <div className="mt-1 font-medium text-stone-800">{detail.trigger || "-"}</div>
                   </div>
                   <div>
                     <div className="text-xs text-stone-500">应用版本</div>
-                    <div className="mt-1 font-medium text-stone-800">{detail.app_version || "—"}</div>
-                  </div>
-                  <div className="md:col-span-2">
-                    <div className="text-xs text-stone-500">存储后端</div>
-                    <pre className="mt-1 overflow-x-auto rounded-lg border border-stone-200 bg-white px-3 py-2 text-xs text-stone-700">{JSON.stringify(detail.storage_backend || {}, null, 2)}</pre>
+                    <div className="mt-1 font-medium text-stone-800">{detail.app_version || "-"}</div>
                   </div>
                 </div>
-
-                <div className="space-y-3">
+                <div className="space-y-2">
                   <h4 className="text-sm font-medium text-stone-800">文件内容</h4>
-                  <div className="space-y-2">
-                    {detail.files.map((item) => (
-                      <div key={item.name} className="rounded-xl border border-stone-200 bg-white px-4 py-3 text-sm">
-                        <div className="break-all font-medium text-stone-800">{item.name}</div>
-                        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-stone-500">
-                          <span>{item.exists ? "已包含" : "缺失"}</span>
-                          <span>大小 {formatBytes(item.size)}</span>
-                          <span>{item.content_type || "application/octet-stream"}</span>
-                          <span className="break-all">SHA256 {item.sha256 || "—"}</span>
-                        </div>
+                  {detail.files.map((item) => (
+                    <div key={item.name} className="rounded-xl border border-stone-200 bg-white px-4 py-3 text-sm">
+                      <div className="break-all font-medium text-stone-800">{item.name}</div>
+                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-stone-500">
+                        <span>大小 {formatBytes(item.size)}</span>
+                        <span>{item.content_type || "application/octet-stream"}</span>
+                        <span className="break-all">SHA256 {item.sha256 || "-"}</span>
                       </div>
-                    ))}
-                  </div>
+                    </div>
+                  ))}
                 </div>
-
-                <div className="space-y-3">
+                <div className="space-y-2">
                   <h4 className="text-sm font-medium text-stone-800">快照内容</h4>
                   <div className="grid gap-3 md:grid-cols-2">
                     {detail.snapshots.map((item) => (
@@ -441,3 +434,4 @@ export function BackupSettingsCard() {
     </>
   );
 }
+

@@ -2,29 +2,36 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { Github } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 
 import { clearAuthSessionCache, getValidatedAuthSession } from "@/lib/auth-session";
+import { fetchMyProfile, fetchOnboarding, fetchPublicConfig, saveOnboarding } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { clearStoredAuthSession, type StoredAuthSession } from "@/store/auth";
 
 const adminNavItems = [
   { href: "/image", label: "画图" },
   { href: "/detail-page", label: "电商工具箱" },
+  { href: "/task-center", label: "任务中心" },
+  { href: "/templates", label: "模板市场" },
   { href: "/gallery", label: "画廊" },
+  { href: "/case-manager", label: "案例管理" },
   { href: "/accounts", label: "号池管理" },
   { href: "/register", label: "注册机" },
   { href: "/image-manager", label: "图片管理" },
   { href: "/logs", label: "日志管理" },
+  { href: "/profile", label: "个人中心" },
   { href: "/settings", label: "设置" },
 ];
 
 const userNavItems = [
   { href: "/image", label: "画图" },
   { href: "/detail-page", label: "电商工具箱" },
+  { href: "/task-center", label: "任务中心" },
+  { href: "/templates", label: "模板市场" },
   { href: "/works", label: "我的作品" },
   { href: "/gallery", label: "画廊" },
+  { href: "/profile", label: "个人中心" },
 ];
 
 // next.config.ts 配了 trailingSlash: true，usePathname 返回 "/image/"，
@@ -41,6 +48,9 @@ export function TopNav() {
   const pathname = usePathname();
   const router = useRouter();
   const [session, setSession] = useState<StoredAuthSession | null | undefined>(undefined);
+  const [siteName, setSiteName] = useState("ChatGPT2API");
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [quotaLabel, setQuotaLabel] = useState("0");
 
   useEffect(() => {
     let active = true;
@@ -66,6 +76,46 @@ export function TopNav() {
       active = false;
     };
   }, [pathname]);
+
+  useEffect(() => {
+    if (pathname === "/login") return;
+    let active = true;
+    fetchPublicConfig()
+      .then((data) => {
+        if (active) {
+          setSiteName(String(data.site_name || "ChatGPT2API"));
+          document.title = String(data.browser_title || data.site_name || "ChatGPT2API");
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!session || pathname === "/login") return;
+    let active = true;
+    Promise.all([fetchOnboarding(), fetchMyProfile().catch(() => null)])
+      .then(([state, profile]) => {
+        if (!active) return;
+        if (!state.state.dismissed) {
+          const p = profile?.profile;
+          setQuotaLabel(p?.unlimited ? "不限" : String(p?.remaining ?? 0));
+          setShowOnboarding(true);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [session, pathname]);
+
+  const finishOnboarding = async () => {
+    setShowOnboarding(false);
+    await saveOnboarding(true).catch(() => undefined);
+    router.push("/detail-page");
+  };
 
   const handleLogout = async () => {
     await clearStoredAuthSession();
@@ -149,34 +199,15 @@ export function TopNav() {
   const indicatorWidth = target ? Math.max(0, target.width - 16) : 0;
 
   return (
+    <>
     <header className="fixed top-0 right-0 left-0 z-40 bg-background/25 backdrop-blur-[28px] backdrop-saturate-150">
       <div className="mx-auto flex h-12 max-w-[1440px] items-center gap-3 px-4 sm:h-14 sm:gap-4 sm:px-6 lg:px-8">
         <div className="flex shrink-0 items-center gap-2 sm:gap-3">
           <Link href="/image" className="group flex shrink-0 -translate-y-[1px] items-center py-1">
-            <span className="text-[20px] font-bold leading-none tracking-[-0.025em] text-foreground">
-              Chat
-            </span>
-            <span className="text-[20px] font-extrabold leading-none tracking-[-0.025em] text-foreground">
-              GPT
-            </span>
-            <span className="ml-[2px] font-data text-[13px] font-semibold leading-none text-muted-foreground/70">
-              2
-            </span>
-            <span className="ml-[2px] font-data text-[16px] font-bold leading-none tracking-[0.02em] text-foreground/85">
-              API
+            <span className="max-w-[220px] truncate text-[20px] font-bold leading-none tracking-[-0.025em] text-foreground">
+              {siteName || "ChatGPT2API"}
             </span>
           </Link>
-          <span className="hidden h-5 w-px bg-border lg:block" />
-          <a
-            href="https://github.com/RemotePinee/ChatGPT2API"
-            target="_blank"
-            rel="noreferrer"
-            className="hidden cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-[13px] leading-none text-muted-foreground transition hover:bg-secondary hover:text-foreground lg:inline-flex"
-            aria-label="GitHub repository"
-          >
-            <Github className="size-[15px] shrink-0" strokeWidth={2} />
-            <span className="translate-y-[1px]">GitHub</span>
-          </a>
         </div>
         {showNav ? (
         <nav
@@ -260,5 +291,30 @@ export function TopNav() {
         </div>
       </div>
     </header>
+    {showOnboarding ? (
+      <div className="fixed inset-0 z-50 grid place-items-center bg-background/70 px-4 backdrop-blur-sm">
+        <div className="w-full max-w-lg rounded-3xl border border-border bg-card p-6 shadow-2xl">
+          <div className="text-xs font-bold uppercase tracking-[0.24em] text-muted-foreground">Welcome</div>
+          <h2 className="mt-2 text-2xl font-black">3 步开始生成电商图片</h2>
+          <div className="mt-5 grid gap-3">
+            {["上传商品图", "选择主图/买家秀/详情页场景", `领取/查看额度：${quotaLabel} 张`].map((item, index) => (
+              <div key={item} className="flex items-center gap-3 rounded-2xl border border-border bg-background p-3">
+                <span className="grid size-8 place-items-center rounded-full bg-foreground text-sm font-black text-background">{index + 1}</span>
+                <span className="text-sm font-semibold">{item}</span>
+              </div>
+            ))}
+          </div>
+          <div className="mt-5 flex flex-col gap-2 sm:flex-row">
+            <button type="button" className="h-11 flex-1 rounded-xl bg-foreground px-4 text-sm font-bold text-background" onClick={() => void finishOnboarding()}>
+              开始生成
+            </button>
+            <button type="button" className="h-11 rounded-xl border border-border px-4 text-sm font-bold" onClick={() => { setShowOnboarding(false); void saveOnboarding(true); }}>
+              稍后再看
+            </button>
+          </div>
+        </div>
+      </div>
+    ) : null}
+    </>
   );
 }

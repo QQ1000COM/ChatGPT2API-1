@@ -1,7 +1,7 @@
 "use client";
 
 import { LoaderCircle, PlugZap } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -140,15 +140,108 @@ export function NetworkSection() {
 
 export function ImageSection() {
   const config = useSettingsStore((s) => s.config);
+  const [currentOrigin, setCurrentOrigin] = useState("");
+  const setSiteName = useSettingsStore((s) => s.setSiteName);
+  const setBrowserTitle = useSettingsStore((s) => s.setBrowserTitle);
   const setBaseUrl = useSettingsStore((s) => s.setBaseUrl);
+  const setQQOAuthField = useSettingsStore((s) => s.setQQOAuthField);
+  const setQQNewUserFreeQuota = useSettingsStore((s) => s.setQQNewUserFreeQuota);
+  const setQQInviteRewardQuota = useSettingsStore((s) => s.setQQInviteRewardQuota);
   const setImageRetentionDays = useSettingsStore((s) => s.setImageRetentionDays);
   const setCleanupProtectGallery = useSettingsStore((s) => s.setCleanupProtectGallery);
   const setCleanupProtectUserImages = useSettingsStore((s) => s.setCleanupProtectUserImages);
   const setImagePollTimeoutSecs = useSettingsStore((s) => s.setImagePollTimeoutSecs);
   const setImageAccountConcurrency = useSettingsStore((s) => s.setImageAccountConcurrency);
+  const qqCallbackBase = currentOrigin || String(config?.base_url || "").replace(/\/+$/, "") || "https://你的域名";
+
+  useEffect(() => {
+    setCurrentOrigin(window.location.origin);
+  }, []);
 
   return (
     <div className="space-y-6">
+      <div className="space-y-2">
+        <label className={LABEL_CLASS}>网站名称</label>
+        <Input
+          value={String(config?.site_name || "")}
+          onChange={(e) => setSiteName(e.target.value)}
+          placeholder="ChatGPT2API"
+          className={INPUT_CLASS}
+        />
+        <p className={HELP_CLASS}>显示在顶部导航左侧，留空时使用默认名称。</p>
+      </div>
+
+      <div className="space-y-2">
+        <label className={LABEL_CLASS}>浏览器标题</label>
+        <Input
+          value={String(config?.browser_title || "")}
+          onChange={(e) => setBrowserTitle(e.target.value)}
+          placeholder="显示在浏览器标签页上的标题"
+          className={INPUT_CLASS}
+        />
+        <p className={HELP_CLASS}>留空时默认使用网站名称。</p>
+      </div>
+
+      <div className="space-y-3 rounded-xl border border-stone-200 bg-stone-50/60 p-4">
+        <div>
+          <div className="text-sm font-semibold text-stone-800">QQ 绑定配置</div>
+          <p className={HELP_CLASS}>用于后续接入 QQ OAuth 授权绑定。当前个人中心支持保存 QQ 绑定信息。</p>
+        </div>
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="space-y-2">
+            <label className={LABEL_CLASS}>QQ APP ID</label>
+            <Input
+              value={String(config?.qq_oauth?.app_id || "")}
+              onChange={(e) => setQQOAuthField("app_id", e.target.value)}
+              placeholder="输入 QQ APP ID"
+              className={INPUT_CLASS}
+            />
+          </div>
+          <div className="space-y-2">
+            <label className={LABEL_CLASS}>APP Key</label>
+            <Input
+              value={String(config?.qq_oauth?.app_key || "")}
+              onChange={(e) => setQQOAuthField("app_key", e.target.value)}
+              placeholder="输入 QQ APP Key"
+              className={INPUT_CLASS}
+            />
+          </div>
+          <div className="space-y-2">
+            <label className={LABEL_CLASS}>新注册用户免费额度</label>
+            <Input
+              type="number"
+              min={0}
+              value={String(config?.qq_oauth?.new_user_free_quota ?? 0)}
+              onChange={(e) => setQQNewUserFreeQuota(e.target.value)}
+              placeholder="0"
+              className={INPUT_CLASS}
+            />
+            <p className={HELP_CLASS}>首次 QQ 授权自动创建普通用户，默认发放 0 张。</p>
+          </div>
+          <div className="space-y-2">
+            <label className={LABEL_CLASS}>邀请返额度</label>
+            <Input
+              type="number"
+              min={0}
+              value={String(config?.qq_oauth?.invite_reward_quota ?? 5)}
+              onChange={(e) => setQQInviteRewardQuota(e.target.value)}
+              placeholder="5"
+              className={INPUT_CLASS}
+            />
+            <p className={HELP_CLASS}>邀请 1 位 QQ 新用户注册，给邀请人增加的生图额度。</p>
+          </div>
+        </div>
+        <div className="space-y-2">
+          <label className={LABEL_CLASS}>回调地址</label>
+          <Input
+            readOnly
+            value={`${qqCallbackBase}/api/oauth/qq/callback`}
+            className={INPUT_CLASS}
+          />
+          <p className={HELP_CLASS}>把这个地址填到 QQ 互联后台；留空图片访问地址时会按当前访问域名显示。</p>
+        </div>
+      </div>
+
       <div className="space-y-2">
         <label className={LABEL_CLASS}>图片访问地址</label>
         <Input

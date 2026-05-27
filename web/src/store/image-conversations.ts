@@ -2,7 +2,15 @@
 
 import localforage from "localforage";
 
-import type { ImageModel } from "@/lib/api";
+import {
+  clearServerImageConversations,
+  deleteServerImageConversation,
+  fetchImageConversations,
+  renameServerImageConversation,
+  replaceImageConversations as replaceServerImageConversations,
+  upsertImageConversation,
+  type ImageModel,
+} from "@/lib/api";
 
 export type ImageConversationMode = "generate" | "edit";
 
@@ -222,6 +230,17 @@ function pickLatestConversation(current: ImageConversation, next: ImageConversat
   return getTimestamp(next.updatedAt) >= getTimestamp(current.updatedAt) ? next : current;
 }
 
+function mergeConversationLists(...lists: ImageConversation[][]): ImageConversation[] {
+  const merged = new Map<string, ImageConversation>();
+  for (const list of lists) {
+    for (const conversation of list.map(normalizeConversation)) {
+      const current = merged.get(conversation.id);
+      merged.set(conversation.id, current ? pickLatestConversation(current, conversation) : conversation);
+    }
+  }
+  return sortImageConversations([...merged.values()]);
+}
+
 function queueImageConversationWrite<T>(operation: () => Promise<T>): Promise<T> {
   const result = imageConversationWriteQueue.then(operation);
   imageConversationWriteQueue = result.then(
@@ -240,10 +259,25 @@ async function readStoredImageConversations(): Promise<ImageConversation[]> {
 }
 
 export async function listImageConversations(): Promise<ImageConversation[]> {
-  return sortImageConversations(await readStoredImageConversations());
+  const localItems = await readStoredImageConversations();
+  try {
+    const remote = await fetchImageConversations();
+    const remoteItems = Array.isArray(remote.items)
+      ? remote.items.map((item) => normalizeConversation(item as ImageConversation & Record<string, unknown>))
+      : [];
+    const merged = mergeConversationLists(remoteItems, localItems);
+    await imageConversationStorage.setItem(IMAGE_CONVERSATIONS_KEY, merged);
+    if (localItems.length > 0 && JSON.stringify(merged) !== JSON.stringify(remoteItems)) {
+      void replaceServerImageConversations(merged);
+    }
+    return merged;
+  } catch {
+    return sortImageConversations(localItems);
+  }
 }
 
 export async function saveImageConversations(conversations: ImageConversation[]): Promise<void> {
+  let nextItems: ImageConversation[] = [];
   await queueImageConversationWrite(async () => {
     const items = await readStoredImageConversations();
     const conversationMap = new Map(items.map((item) => [item.id, item]));
@@ -251,25 +285,29 @@ export async function saveImageConversations(conversations: ImageConversation[])
       const current = conversationMap.get(conversation.id);
       conversationMap.set(conversation.id, current ? pickLatestConversation(current, conversation) : conversation);
     }
-    await imageConversationStorage.setItem(
-      IMAGE_CONVERSATIONS_KEY,
-      sortImageConversations([...conversationMap.values()]),
-    );
+    nextItems = sortImageConversations([...conversationMap.values()]);
+    await imageConversationStorage.setItem(IMAGE_CONVERSATIONS_KEY, nextItems);
   });
+  await replaceServerImageConversations(nextItems);
 }
 
 export async function saveImageConversation(conversation: ImageConversation): Promise<void> {
+  let persistedConversation: ImageConversation | null = null;
   await queueImageConversationWrite(async () => {
     const items = await readStoredImageConversations();
     const nextConversation = normalizeConversation(conversation);
     const current = items.find((item) => item.id === nextConversation.id);
-    const persistedConversation = current ? pickLatestConversation(current, nextConversation) : nextConversation;
+    const nextPersistedConversation = current ? pickLatestConversation(current, nextConversation) : nextConversation;
+    persistedConversation = nextPersistedConversation;
     const nextItems = sortImageConversations([
-      persistedConversation,
-      ...items.filter((item) => item.id !== persistedConversation.id),
+      nextPersistedConversation,
+      ...items.filter((item) => item.id !== nextPersistedConversation.id),
     ]);
     await imageConversationStorage.setItem(IMAGE_CONVERSATIONS_KEY, nextItems);
   });
+  if (persistedConversation) {
+    await upsertImageConversation(persistedConversation);
+  }
 }
 
 export async function renameImageConversation(id: string, title: string): Promise<void> {
@@ -284,6 +322,7 @@ export async function renameImageConversation(id: string, title: string): Promis
     ]);
     await imageConversationStorage.setItem(IMAGE_CONVERSATIONS_KEY, nextItems);
   });
+  await renameServerImageConversation(id, title);
 }
 
 export async function deleteImageConversation(id: string): Promise<void> {
@@ -294,12 +333,14 @@ export async function deleteImageConversation(id: string): Promise<void> {
       items.filter((item) => item.id !== id),
     );
   });
+  await deleteServerImageConversation(id);
 }
 
 export async function clearImageConversations(): Promise<void> {
   await queueImageConversationWrite(async () => {
     await imageConversationStorage.removeItem(IMAGE_CONVERSATIONS_KEY);
   });
+  await clearServerImageConversations();
 }
 
 export function getImageConversationStats(conversation: ImageConversation | null): ImageConversationStats {

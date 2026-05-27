@@ -70,6 +70,8 @@ class AuthService:
             "quota": self._coerce_int(raw.get("quota"), 0),
             "used": self._coerce_int(raw.get("used"), 0),
             "unlimited": bool(raw.get("unlimited", False)),
+            "qq": self._clean(raw.get("qq")),
+            "qq_bound_at": self._clean(raw.get("qq_bound_at")) or None,
         }
 
     def _load(self) -> list[dict[str, object]]:
@@ -105,6 +107,8 @@ class AuthService:
             "used": used,
             "unlimited": unlimited,
             "remaining": remaining,
+            "qq": item.get("qq") or "",
+            "qq_bound_at": item.get("qq_bound_at"),
         }
 
     def list_keys(self, role: AuthRole | None = None) -> list[dict[str, object]]:
@@ -258,6 +262,54 @@ class AuthService:
             for item in self._items:
                 if item.get("id") == normalized_id:
                     return self._public_item(item)
+        return None
+
+    def bind_qq(self, key_id: str, qq: str) -> dict[str, object] | None:
+        normalized_id = self._clean(key_id)
+        normalized_qq = self._clean(qq)
+        if not normalized_id:
+            return None
+        with self._lock:
+            self._reload_locked()
+            for index, item in enumerate(self._items):
+                if item.get("id") != normalized_id:
+                    continue
+                next_item = dict(item)
+                next_item["qq"] = normalized_qq
+                next_item["qq_bound_at"] = _now_iso() if normalized_qq else None
+                self._items[index] = next_item
+                self._save()
+                return self._public_item(next_item)
+        return None
+
+    def get_by_qq(self, qq: str) -> dict[str, object] | None:
+        normalized_qq = self._clean(qq)
+        if not normalized_qq:
+            return None
+        with self._lock:
+            self._reload_locked()
+            for item in self._items:
+                if self._clean(item.get("qq")) == normalized_qq:
+                    return self._public_item(item)
+        return None
+
+    def add_quota(self, key_id: str, amount: int) -> dict[str, object] | None:
+        normalized_id = self._clean(key_id)
+        delta = self._coerce_int(amount, 0)
+        if not normalized_id or delta <= 0:
+            return None
+        with self._lock:
+            self._reload_locked()
+            for index, item in enumerate(self._items):
+                if item.get("id") != normalized_id:
+                    continue
+                next_item = dict(item)
+                if str(next_item.get("role") or "").strip().lower() == "admin" or bool(next_item.get("unlimited", False)):
+                    return self._public_item(next_item)
+                next_item["quota"] = self._coerce_int(next_item.get("quota"), 0) + delta
+                self._items[index] = next_item
+                self._save()
+                return self._public_item(next_item)
         return None
 
     def consume_quota(self, key_id: str, amount: int) -> dict[str, object]:

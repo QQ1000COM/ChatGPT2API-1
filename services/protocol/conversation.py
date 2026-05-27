@@ -14,6 +14,8 @@ import tiktoken
 from services.account_service import account_service
 from services.config import config
 from services.openai_backend_api import OpenAIBackendAPI
+from services.remote_storage_service import RemoteStorageError, upload_image_bytes
+from services.remote_image_index_service import upsert_remote_image
 from utils.helper import IMAGE_MODELS, extract_image_from_message_content
 from utils.log import logger
 
@@ -67,14 +69,41 @@ def encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
 
 
 def save_image_bytes(image_data: bytes, base_url: str | None = None) -> str:
+    return save_image_bytes_result(image_data, base_url)["url"]
+
+
+def save_image_bytes_result(image_data: bytes, base_url: str | None = None) -> dict[str, str]:
     config.cleanup_old_images()
     file_hash = hashlib.md5(image_data).hexdigest()
     filename = f"{int(time.time())}_{file_hash}.png"
     relative_dir = Path(time.strftime("%Y"), time.strftime("%m"), time.strftime("%d"))
+    relative_path = f"{relative_dir.as_posix()}/{filename}"
     file_path = config.images_dir / relative_dir / filename
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_bytes(image_data)
-    return f"{(base_url or config.base_url)}/images/{relative_dir.as_posix()}/{filename}"
+    local_url = f"/images/{relative_path}"
+    absolute_local_url = f"{(base_url or config.base_url).rstrip()}{local_url}" if base_url or config.base_url else local_url
+    try:
+        remote_url = upload_image_bytes(relative_path, image_data, content_type="image/png")
+        if remote_url:
+            upsert_remote_image(relative_path, {
+                "name": filename,
+                "url": remote_url,
+                "thumbnail_url": remote_url,
+                "local_url": local_url,
+                "size": len(image_data),
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "date": time.strftime("%Y-%m-%d"),
+            })
+            if bool(config.get_remote_storage_settings().get("delete_local_after_upload")):
+                try:
+                    file_path.unlink()
+                except FileNotFoundError:
+                    pass
+            return {"url": remote_url, "local_url": local_url}
+    except RemoteStorageError as exc:
+        logger.warning({"event": "remote_image_upload_failed", "path": relative_path, "error": str(exc)})
+    return {"url": absolute_local_url, "local_url": local_url}
 
 
 def message_text(content: Any) -> str:
@@ -196,15 +225,18 @@ def format_image_result(
         if not b64_json:
             continue
         revised_prompt = str(item.get("revised_prompt") or prompt).strip() or prompt
+        saved_image = save_image_bytes_result(base64.b64decode(b64_json), base_url)
         if response_format == "b64_json":
             data.append({
                 "b64_json": b64_json,
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url),
+                "url": saved_image["url"],
+                "local_url": saved_image["local_url"],
                 "revised_prompt": revised_prompt,
             })
         else:
             data.append({
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url),
+                "url": saved_image["url"],
+                "local_url": saved_image["local_url"],
                 "revised_prompt": revised_prompt,
             })
     result: dict[str, Any] = {"created": created or int(time.time()), "data": data}

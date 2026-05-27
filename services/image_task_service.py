@@ -14,6 +14,7 @@ from services.image_owners_service import record_owner_for_result
 from services.image_prompts_service import record_prompt_for_result
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
+from services.remote_image_index_service import find_remote_image_by_url
 
 TASK_STATUS_QUEUED = "queued"
 TASK_STATUS_RUNNING = "running"
@@ -82,10 +83,36 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
         "updated_at": task.get("updated_at"),
     }
     if task.get("data") is not None:
-        item["data"] = task.get("data")
+        item["data"] = _public_task_data(task.get("data"))
     if task.get("error"):
         item["error"] = task.get("error")
+    if task.get("prompt"):
+        item["prompt"] = task.get("prompt")
+    if task.get("retry_count") is not None:
+        item["retry_count"] = int(task.get("retry_count") or 0)
     return item
+
+
+def _public_task_data(data: Any) -> Any:
+    if not isinstance(data, list):
+        return data
+    result: list[Any] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            result.append(entry)
+            continue
+        next_entry = dict(entry)
+        if not next_entry.get("local_url"):
+            url = str(next_entry.get("url") or "").strip()
+            if "/images/" in url:
+                next_entry["local_url"] = url[url.find("/images/"):]
+            else:
+                remote = find_remote_image_by_url(url)
+                rel = str((remote or {}).get("rel") or (remote or {}).get("path") or "").strip().lstrip("/")
+                if rel:
+                    next_entry["local_url"] = f"/images/{rel}"
+        result.append(next_entry)
+    return result
 
 
 class ImageTaskService:
@@ -214,6 +241,31 @@ class ImageTaskService:
             self._refund_one(identity)
         return {"canceled": canceled, "skipped": skipped, "missing_ids": missing_ids}
 
+    def rerun_task(self, identity: dict[str, object], task_id: str, *, base_url: str) -> dict[str, Any]:
+        owner = _owner_id(identity)
+        source_id = _clean(task_id)
+        if not source_id:
+            raise ValueError("task_id is required")
+        with self._lock:
+            source = self._tasks.get(_task_key(owner, source_id))
+            if source is None:
+                raise ValueError("任务不存在")
+            if source.get("mode") != "generate":
+                raise ValueError("当前仅支持文生图任务重新生成")
+            prompt = _clean(source.get("prompt"))
+            if not prompt:
+                raise ValueError("这个任务没有可复用提示词")
+            model = _clean(source.get("model"), "gpt-image-2")
+            size = _clean(source.get("size"))
+        return self.submit_generation(
+            identity,
+            client_task_id=f"{source_id}-rerun-{int(time.time())}",
+            prompt=prompt,
+            model=model,
+            size=size or None,
+            base_url=base_url,
+        )
+
     def _refund_one(self, identity: dict[str, object]) -> None:
         """退还 1 张入口预扣额度。
         admin / unlimited / 匿名身份内部 noop；普通用户的 used 减 1 不会跌破 0。
@@ -259,6 +311,8 @@ class ImageTaskService:
                 "mode": mode,
                 "model": _clean(payload.get("model"), "gpt-image-2"),
                 "size": _clean(payload.get("size")),
+                "prompt": _clean(payload.get("prompt")),
+                "retry_count": 0,
                 "created_at": now,
                 "updated_at": now,
             }
@@ -292,9 +346,26 @@ class ImageTaskService:
 
         started = time.time()
         self._update_task(key, status=TASK_STATUS_RUNNING, error="")
+        max_attempts = 2
+        attempt = 0
+        while attempt < max_attempts:
+            attempt += 1
+            try:
+                handler = self.edit_handler if mode == "edit" else self.generation_handler
+                result = handler(payload)
+                break
+            except Exception as exc:
+                with self._lock:
+                    task = self._tasks.get(key)
+                    if task is not None:
+                        task["retry_count"] = attempt - 1
+                        task["updated_at"] = _now_iso()
+                        self._save_locked()
+                if attempt < max_attempts:
+                    time.sleep(1.5)
+                    continue
+                raise exc
         try:
-            handler = self.edit_handler if mode == "edit" else self.generation_handler
-            result = handler(payload)
             # 请求结束后再检查：若期间被取消，丢弃结果不写回
             with self._lock:
                 task = self._tasks.get(key)
@@ -421,6 +492,8 @@ class ImageTaskService:
                 "mode": "edit" if item.get("mode") == "edit" else "generate",
                 "model": _clean(item.get("model"), "gpt-image-2"),
                 "size": _clean(item.get("size")),
+                "prompt": _clean(item.get("prompt")),
+                "retry_count": int(item.get("retry_count") or 0),
                 "created_at": _clean(item.get("created_at"), _now_iso()),
                 "updated_at": _clean(item.get("updated_at"), _clean(item.get("created_at"), _now_iso())),
             }

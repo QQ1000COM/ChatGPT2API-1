@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { create } from "zustand";
 import { toast } from "sonner";
@@ -13,11 +13,14 @@ import {
   fetchRegisterConfig,
   resetRegister as resetRegisterApi,
   fetchSettingsConfig,
+  importLocalBackup,
+  restoreBackup,
   runBackupNow,
   startRegister,
   startCPAImport,
   stopRegister,
   testBackupConnection,
+  testRemoteStorageConnection,
   updateCPAPool,
   updateRegisterConfig,
   updateSettingsConfig,
@@ -27,6 +30,7 @@ import {
   type CPAPool,
   type CPARemoteFile,
   type RegisterConfig,
+  type RemoteStorageSettings,
   type SettingsConfig,
 } from "@/lib/api";
 
@@ -49,6 +53,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
       rotation_keep: 10,
       encrypt: false,
       passphrase: "",
+      webdav: { url: "", username: "", password: "" },
       include: {
         config: true,
         register: true,
@@ -56,10 +61,22 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
         sub2api: true,
         logs: true,
         image_tasks: true,
+        image_conversations: true,
         accounts_snapshot: true,
         auth_keys_snapshot: true,
         images: false,
       },
+    };
+  const remoteStorage = typeof config.remote_storage === "object" && config.remote_storage
+    ? config.remote_storage as RemoteStorageSettings
+    : {
+      enabled: false,
+      provider: "local",
+      path_prefix: "images",
+      public_base_url: "",
+      delete_local_after_upload: false,
+      webdav: { url: "", username: "", password: "" },
+      s3: { endpoint: "", region: "auto", bucket: "", access_key_id: "", secret_access_key: "" },
     };
   return {
     ...config,
@@ -73,6 +90,8 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
     log_levels: Array.isArray(config.log_levels) ? config.log_levels : [],
     proxy: typeof config.proxy === "string" ? config.proxy : "",
+    site_name: typeof config.site_name === "string" ? config.site_name : "ChatGPT2API",
+    browser_title: typeof config.browser_title === "string" ? config.browser_title : String(config.site_name || "ChatGPT2API"),
     base_url: typeof config.base_url === "string" ? config.base_url : "",
     global_system_prompt: String(config.global_system_prompt || ""),
     sensitive_words: Array.isArray(config.sensitive_words) ? config.sensitive_words : [],
@@ -86,6 +105,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     backup: {
       ...backup,
       enabled: Boolean(backup.enabled),
+      provider: String(backup.provider || "cloudflare_r2"),
       account_id: String(backup.account_id || ""),
       access_key_id: String(backup.access_key_id || ""),
       secret_access_key: String(backup.secret_access_key || ""),
@@ -102,10 +122,42 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
         sub2api: Boolean(backup.include?.sub2api ?? true),
         logs: Boolean(backup.include?.logs ?? true),
         image_tasks: Boolean(backup.include?.image_tasks ?? true),
+        image_conversations: Boolean(backup.include?.image_conversations ?? true),
         accounts_snapshot: Boolean(backup.include?.accounts_snapshot ?? true),
         auth_keys_snapshot: Boolean(backup.include?.auth_keys_snapshot ?? true),
         images: Boolean(backup.include?.images ?? false),
       },
+      webdav: {
+        url: String(backup.webdav?.url || ""),
+        username: String(backup.webdav?.username || ""),
+        password: String(backup.webdav?.password || ""),
+      },
+    },
+    remote_storage: {
+      ...remoteStorage,
+      enabled: Boolean(remoteStorage.enabled),
+      provider: String(remoteStorage.provider || "local"),
+      path_prefix: String(remoteStorage.path_prefix || "images"),
+      public_base_url: String(remoteStorage.public_base_url || ""),
+      delete_local_after_upload: Boolean(remoteStorage.delete_local_after_upload),
+      webdav: {
+        url: String(remoteStorage.webdav?.url || ""),
+        username: String(remoteStorage.webdav?.username || ""),
+        password: String(remoteStorage.webdav?.password || ""),
+      },
+      s3: {
+        endpoint: String(remoteStorage.s3?.endpoint || ""),
+        region: String(remoteStorage.s3?.region || "auto"),
+        bucket: String(remoteStorage.s3?.bucket || ""),
+        access_key_id: String(remoteStorage.s3?.access_key_id || ""),
+        secret_access_key: String(remoteStorage.s3?.secret_access_key || ""),
+      },
+    },
+    qq_oauth: {
+      app_id: String(config.qq_oauth?.app_id || ""),
+      app_key: String(config.qq_oauth?.app_key || ""),
+      new_user_free_quota: Math.max(0, Number(config.qq_oauth?.new_user_free_quota) || 0),
+      invite_reward_quota: Math.max(0, Number(config.qq_oauth?.invite_reward_quota ?? 5) || 5),
     },
   };
 }
@@ -115,7 +167,16 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
 // 紧接着实际操作再报错，UI 同时冒两条互相打架的提示。
 function collectMissingBackupFields(backup: BackupSettings | undefined | null): string | null {
   if (!backup) {
-    return "R2 备份配置";
+    return "备份配置";
+  }
+  if (String(backup.provider || "cloudflare_r2") === "webdav") {
+    const webdav = backup.webdav || { url: "", username: "", password: "" };
+    const missing = [
+      !String(webdav.url || "").trim() ? "WebDAV 地址" : "",
+      !String(webdav.username || "").trim() ? "账号" : "",
+      !String(webdav.password || "").trim() ? "密码" : "",
+    ].filter(Boolean);
+    return missing.length > 0 ? missing.join("、") : null;
   }
   const required: Array<{ key: keyof BackupSettings; label: string }> = [
     { key: "account_id", label: "Cloudflare Account ID" },
@@ -126,10 +187,7 @@ function collectMissingBackupFields(backup: BackupSettings | undefined | null): 
   const missing = required
     .filter((item) => !String(backup[item.key] ?? "").trim())
     .map((item) => item.label);
-  if (missing.length === 0) {
-    return null;
-  }
-  return missing.join("、");
+  return missing.length === 0 ? null : missing.join("、");
 }
 
 function normalizeFiles(items: CPARemoteFile[]) {
@@ -163,8 +221,10 @@ type SettingsStore = {
   backupState: BackupState | null;
   isLoadingBackups: boolean;
   isRunningBackup: boolean;
+  isRestoringBackup: boolean;
   deletingBackupKey: string | null;
   isTestingBackup: boolean;
+  isTestingRemoteStorage: boolean;
 
   registerConfig: RegisterConfig | null;
   isLoadingRegister: boolean;
@@ -199,6 +259,8 @@ type SettingsStore = {
   revertConfig: () => Promise<void>;
   loadBackups: (silent?: boolean) => Promise<void>;
   runBackup: () => Promise<void>;
+  restoreBackupFromRemote: (key: string) => Promise<void>;
+  importBackupFromFile: (file: File) => Promise<void>;
   removeBackup: (key: string) => Promise<void>;
   testBackup: () => Promise<void>;
   setRefreshAccountIntervalMinute: (value: string) => void;
@@ -211,12 +273,20 @@ type SettingsStore = {
   setAutoRemoveRateLimitedAccounts: (value: boolean) => void;
   setLogLevel: (level: string, enabled: boolean) => void;
   setProxy: (value: string) => void;
+  setSiteName: (value: string) => void;
+  setBrowserTitle: (value: string) => void;
   setBaseUrl: (value: string) => void;
+  setQQOAuthField: (key: "app_id" | "app_key", value: string) => void;
+  setQQNewUserFreeQuota: (value: string) => void;
+  setQQInviteRewardQuota: (value: string) => void;
   setGlobalSystemPrompt: (value: string) => void;
   setSensitiveWordsText: (value: string) => void;
   setAIReviewField: (key: "enabled" | "base_url" | "api_key" | "model" | "prompt", value: string | boolean) => void;
-  setBackupField: (key: keyof BackupSettings, value: string | boolean) => void;
+  setBackupField: (key: keyof BackupSettings, value: string | boolean | Record<string, string>) => void;
   setBackupInclude: (key: keyof BackupSettings["include"], value: boolean) => void;
+  setRemoteStorageField: (key: keyof RemoteStorageSettings, value: string | boolean) => void;
+  setRemoteStorageNestedField: (group: "webdav" | "s3", key: string, value: string) => void;
+  testRemoteStorage: () => Promise<void>;
 
   loadRegister: (silent?: boolean) => Promise<void>;
   setRegisterConfig: (config: RegisterConfig) => void;
@@ -265,8 +335,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   backupState: null,
   isLoadingBackups: true,
   isRunningBackup: false,
+  isRestoringBackup: false,
   deletingBackupKey: null,
   isTestingBackup: false,
+  isTestingRemoteStorage: false,
 
   registerConfig: null,
   isLoadingRegister: true,
@@ -297,12 +369,18 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   initialize: async () => {
     await Promise.allSettled([get().loadConfig(), get().loadPools()]);
     const backup = get().config?.backup;
-    const isConfigured = Boolean(
-      String(backup?.account_id || "").trim()
-      && String(backup?.access_key_id || "").trim()
-      && String(backup?.secret_access_key || "").trim()
-      && String(backup?.bucket || "").trim(),
-    );
+    const isConfigured = String(backup?.provider || "cloudflare_r2") === "webdav"
+      ? Boolean(
+        String(backup?.webdav?.url || "").trim()
+        && String(backup?.webdav?.username || "").trim()
+        && String(backup?.webdav?.password || "").trim(),
+      )
+      : Boolean(
+        String(backup?.account_id || "").trim()
+        && String(backup?.access_key_id || "").trim()
+        && String(backup?.secret_access_key || "").trim()
+        && String(backup?.bucket || "").trim(),
+      );
     if (isConfigured) {
       await get().loadBackups();
     } else {
@@ -373,6 +451,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
         auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
         proxy: config.proxy.trim(),
+        site_name: String(config.site_name || "ChatGPT2API").trim(),
+        browser_title: String(config.browser_title || "").trim(),
         base_url: String(config.base_url || "").trim(),
         global_system_prompt: String(config.global_system_prompt || "").trim(),
         sensitive_words: (config.sensitive_words || []).map((item) => String(item).trim()).filter(Boolean),
@@ -385,6 +465,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         },
         backup: {
           ...(config.backup as BackupSettings),
+          provider: String(config.backup?.provider || "cloudflare_r2").trim(),
           account_id: String(config.backup?.account_id || "").trim(),
           access_key_id: String(config.backup?.access_key_id || "").trim(),
           secret_access_key: String(config.backup?.secret_access_key || "").trim(),
@@ -393,6 +474,36 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           interval_minutes: Math.max(1, Number(config.backup?.interval_minutes) || 360),
           rotation_keep: Math.max(0, Number(config.backup?.rotation_keep) || 0),
           passphrase: String(config.backup?.passphrase || "").trim(),
+          webdav: {
+            url: String(config.backup?.webdav?.url || "").trim(),
+            username: String(config.backup?.webdav?.username || "").trim(),
+            password: String(config.backup?.webdav?.password || "").trim(),
+          },
+        },
+        remote_storage: {
+          ...(config.remote_storage as RemoteStorageSettings),
+          provider: String(config.remote_storage?.provider || "local").trim(),
+          path_prefix: String(config.remote_storage?.path_prefix || "images").trim(),
+          public_base_url: String(config.remote_storage?.public_base_url || "").trim(),
+          delete_local_after_upload: Boolean(config.remote_storage?.delete_local_after_upload),
+          webdav: {
+            url: String(config.remote_storage?.webdav?.url || "").trim(),
+            username: String(config.remote_storage?.webdav?.username || "").trim(),
+            password: String(config.remote_storage?.webdav?.password || "").trim(),
+          },
+          s3: {
+            endpoint: String(config.remote_storage?.s3?.endpoint || "").trim(),
+            region: String(config.remote_storage?.s3?.region || "auto").trim(),
+            bucket: String(config.remote_storage?.s3?.bucket || "").trim(),
+            access_key_id: String(config.remote_storage?.s3?.access_key_id || "").trim(),
+            secret_access_key: String(config.remote_storage?.s3?.secret_access_key || "").trim(),
+          },
+        },
+        qq_oauth: {
+          app_id: String(config.qq_oauth?.app_id || "").trim(),
+          app_key: String(config.qq_oauth?.app_key || "").trim(),
+          new_user_free_quota: Math.max(0, Math.floor(Number(config.qq_oauth?.new_user_free_quota) || 0)),
+          invite_reward_quota: Math.max(0, Math.floor(Number(config.qq_oauth?.invite_reward_quota) || 0)),
         },
       });
       set({
@@ -543,6 +654,75 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     });
   },
 
+  setSiteName: (value) => {
+    set((state) => state.config ? { config: { ...state.config, site_name: value }, isDirty: true } : {});
+  },
+
+  setBrowserTitle: (value) => {
+    set((state) => state.config ? { config: { ...state.config, browser_title: value }, isDirty: true } : {});
+  },
+
+  setQQOAuthField: (key, value) => {
+    set((state) => state.config ? { config: { ...state.config, qq_oauth: { ...(state.config.qq_oauth || {}), [key]: value } }, isDirty: true } : {});
+  },
+
+  setQQNewUserFreeQuota: (value) => {
+    set((state) => state.config ? { config: { ...state.config, qq_oauth: { ...(state.config.qq_oauth || {}), new_user_free_quota: value } }, isDirty: true } : {});
+  },
+
+  setQQInviteRewardQuota: (value) => {
+    set((state) => state.config ? { config: { ...state.config, qq_oauth: { ...(state.config.qq_oauth || {}), invite_reward_quota: value } }, isDirty: true } : {});
+  },
+
+  setRemoteStorageField: (key, value) => {
+    set((state) => {
+      if (!state.config?.remote_storage) return {};
+      return {
+        config: {
+          ...state.config,
+          remote_storage: {
+            ...state.config.remote_storage,
+            [key]: value,
+          },
+        },
+        isDirty: true,
+      };
+    });
+  },
+
+  setRemoteStorageNestedField: (group, key, value) => {
+    set((state) => {
+      if (!state.config?.remote_storage) return {};
+      return {
+        config: {
+          ...state.config,
+          remote_storage: {
+            ...state.config.remote_storage,
+            [group]: {
+              ...(state.config.remote_storage[group] as Record<string, string>),
+              [key]: value,
+            },
+          },
+        },
+        isDirty: true,
+      };
+    });
+  },
+
+  testRemoteStorage: async () => {
+    set({ isTestingRemoteStorage: true });
+    try {
+      const saved = await get().saveConfig();
+      if (!saved) return;
+      const data = await testRemoteStorageConnection();
+      toast.success(`远程存储连接正常：${data.result.provider} HTTP ${data.result.status}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "测试远程存储失败");
+    } finally {
+      set({ isTestingRemoteStorage: false });
+    }
+  },
+
   loadBackups: async (silent = false) => {
     // 已有数据时同样视作静默刷新，避免 BackupSettingsCard 切回时坍缩。
     const effectiveSilent = silent || get().backups.length > 0 || get().backupState !== null;
@@ -598,6 +778,32 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       toast.error(error instanceof Error ? error.message : "删除备份失败");
     } finally {
       set({ deletingBackupKey: null });
+    }
+  },
+
+  restoreBackupFromRemote: async (key) => {
+    set({ isRestoringBackup: true });
+    try {
+      const data = await restoreBackup(key);
+      toast.success(`备份已导入，恢复 ${data.result.count} 项数据`);
+      await Promise.allSettled([get().loadConfig(), get().loadBackups(true)]);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "导入备份失败");
+    } finally {
+      set({ isRestoringBackup: false });
+    }
+  },
+
+  importBackupFromFile: async (file) => {
+    set({ isRestoringBackup: true });
+    try {
+      const data = await importLocalBackup(file);
+      toast.success(`本地备份已导入，恢复 ${data.result.count} 项数据`);
+      await Promise.allSettled([get().loadConfig(), get().loadBackups(true)]);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "导入本地备份失败");
+    } finally {
+      set({ isRestoringBackup: false });
     }
   },
 
@@ -968,3 +1174,4 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     }
   },
 }));
+

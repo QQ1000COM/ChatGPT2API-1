@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { History, Infinity as InfinityIcon, LoaderCircle, Plus, Trash2 } from "lucide-react";
+import { History, Infinity as InfinityIcon, LoaderCircle, Plus, Trash2, UploadCloud } from "lucide-react";
 import { toast } from "sonner";
 
 import { ImageComposer, type CommerceSuitePrompt } from "@/app/image/components/image-composer";
@@ -404,6 +404,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   const [conversations, setConversations] = useState<ImageConversation[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
+  const [isUploadingHistory, setIsUploadingHistory] = useState(false);
   const [availableQuota, setAvailableQuota] = useState("加载中...");
   const [lightboxImages, setLightboxImages] = useState<ImageLightboxItem[]>([]);
   const [lightboxOpen, setLightboxOpen] = useState(false);
@@ -916,6 +917,18 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     } catch (error) {
       const message = error instanceof Error ? error.message : "清空历史记录失败";
       toast.error(message);
+    }
+  };
+
+  const handleUploadHistoryToServer = async () => {
+    setIsUploadingHistory(true);
+    try {
+      await saveImageConversations(conversationsRef.current);
+      toast.success("会话已上传到服务器");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "上传会话失败");
+    } finally {
+      setIsUploadingHistory(false);
     }
   };
 
@@ -1641,6 +1654,15 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
           >
             <Plus className="size-4" />
             <span className="hidden sm:inline text-[13px]">新建</span>
+          </Button>
+          <Button
+            variant="outline"
+            className="h-9 cursor-pointer rounded-lg border-border bg-card/90 px-2 text-muted-foreground shadow-[0_4px_16px_-6px_rgba(15,23,42,0.18)] backdrop-blur hover:text-foreground"
+            onClick={() => void handleUploadHistoryToServer()}
+            disabled={isUploadingHistory || conversations.length === 0}
+            title="上传会话到服务器"
+          >
+            {isUploadingHistory ? <LoaderCircle className="size-4 animate-spin" /> : <UploadCloud className="size-4" />}
           </Button>
           <Button
             variant="outline"

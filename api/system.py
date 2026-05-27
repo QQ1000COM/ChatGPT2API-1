@@ -1,21 +1,26 @@
 from __future__ import annotations
 
-from urllib.parse import quote
+import json
+import re
+from urllib.parse import parse_qs, quote, urlencode
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from curl_cffi import requests
+from fastapi import APIRouter, File, Header, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from api.support import require_admin, require_identity, resolve_image_base_url
 from services.auth_service import auth_service
 from services.backup_service import BackupError, backup_service
 from services.config import config
+from services import gallery_service
 from services.image_owners_service import get_owner, owner_counts
 from services.image_service import count_total_images, delete_images, download_images_zip, get_image_download_response, get_thumbnail_response, list_images
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_service import log_service
 from services.proxy_service import test_proxy
+from services.remote_storage_service import RemoteStorageError, test_remote_storage
 
 
 def _admin_owner_ids() -> set[str]:
@@ -30,6 +35,107 @@ def _admin_owner_ids() -> set[str]:
         if uid:
             ids.add(uid)
     return ids
+
+
+def _request_origin(request: Request) -> str:
+    scheme = str(request.headers.get("x-forwarded-proto") or request.url.scheme).split(",")[0].strip()
+    host = str(request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc).split(",")[0].strip()
+    return f"{scheme}://{host}".rstrip("/")
+
+
+def _qq_callback_url(request: Request) -> str:
+    return f"{_request_origin(request)}/api/oauth/qq/callback"
+
+
+def _profile_redirect(request: Request, status: str, message: str = "") -> RedirectResponse:
+    params = {"qq_bind": status}
+    if message:
+        params["message"] = message
+    return RedirectResponse(f"{_request_origin(request)}/profile?{urlencode(params)}", status_code=302)
+
+
+def _login_redirect(request: Request, status: str, token: str = "", message: str = "") -> RedirectResponse:
+    params = {"qq_login": status}
+    if token:
+        params["token"] = token
+    if message:
+        params["message"] = message
+    return RedirectResponse(f"{_request_origin(request)}/login?{urlencode(params)}", status_code=302)
+
+
+def _parse_qq_openid(payload: str) -> str:
+    match = re.search(r"\{.*\}", payload or "", re.S)
+    if not match:
+        raise ValueError("QQ 未返回 openid")
+    data = json.loads(match.group(0))
+    openid = str(data.get("openid") or "").strip()
+    if not openid:
+        raise ValueError("QQ openid 为空")
+    return openid
+
+
+def _create_qq_user(openid: str) -> dict[str, object]:
+    settings = config.get_qq_oauth_settings()
+    quota = max(0, int(settings.get("new_user_free_quota") or 0))
+    suffix = openid[-6:] if len(openid) >= 6 else openid
+    for index in range(1, 20):
+        name = f"QQ用户 {suffix}" if index == 1 else f"QQ用户 {suffix}-{index}"
+        try:
+            profile, _raw_key = auth_service.create_key(
+                role="user",
+                name=name,
+                quota=quota,
+                unlimited=False,
+            )
+            break
+        except ValueError:
+            continue
+    else:
+        raise ValueError("QQ 用户账号创建失败，请稍后重试")
+    bound = auth_service.bind_qq(str(profile.get("id") or ""), openid)
+    return bound or profile
+
+
+def _apply_invite_reward(invite_code: str, new_user_id: str) -> None:
+    inviter_id = str(invite_code or "").strip()
+    if not inviter_id or inviter_id == str(new_user_id or "").strip() or inviter_id == "admin":
+        return
+    reward = int(config.get_qq_oauth_settings().get("invite_reward_quota") or 5)
+    if reward <= 0:
+        return
+    auth_service.add_quota(inviter_id, reward)
+
+
+def _exchange_qq_openid(code: str, redirect_uri: str) -> str:
+    settings = config.get_qq_oauth_settings()
+    app_id = str(settings.get("app_id") or "").strip()
+    app_key = str(settings.get("app_key") or "").strip()
+    if not app_id or not app_key:
+        raise ValueError("后台未配置 QQ APP ID 或 APP Key")
+    token_response = requests.get(
+        "https://graph.qq.com/oauth2.0/token",
+        params={
+            "grant_type": "authorization_code",
+            "client_id": app_id,
+            "client_secret": app_key,
+            "code": code,
+            "redirect_uri": redirect_uri,
+        },
+        timeout=20,
+        impersonate="chrome",
+    )
+    token_text = token_response.text
+    token_params = parse_qs(token_text, keep_blank_values=True)
+    access_token = str((token_params.get("access_token") or [""])[0]).strip()
+    if not access_token:
+        raise ValueError(f"QQ access_token 获取失败：{token_text[:120]}")
+    openid_response = requests.get(
+        "https://graph.qq.com/oauth2.0/me",
+        params={"access_token": access_token},
+        timeout=20,
+        impersonate="chrome",
+    )
+    return _parse_qq_openid(openid_response.text)
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -60,6 +166,14 @@ class BackupDeleteRequest(BaseModel):
     key: str = ""
 
 
+class BackupRestoreRequest(BaseModel):
+    key: str = ""
+
+
+class QQBindRequest(BaseModel):
+    qq: str = ""
+
+
 def create_router(app_version: str) -> APIRouter:
     router = APIRouter()
 
@@ -77,6 +191,164 @@ def create_router(app_version: str) -> APIRouter:
     @router.get("/version")
     async def get_version():
         return {"version": app_version}
+
+    @router.get("/api/public-config")
+    async def get_public_config():
+        return {
+            "site_name": config.site_name,
+            "browser_title": config.browser_title,
+            "qq_oauth_enabled": bool(str(config.get_qq_oauth_settings().get("app_id") or "").strip()),
+            "new_user_free_quota": int(config.get_qq_oauth_settings().get("new_user_free_quota") or 0),
+            "invite_reward_quota": int(config.get_qq_oauth_settings().get("invite_reward_quota") or 5),
+        }
+
+    @router.get("/api/public-cases")
+    async def get_public_cases(request: Request):
+        return gallery_service.list_feed(
+            cursor=None,
+            limit=9,
+            image_base_url=resolve_image_base_url(request),
+            include_hidden=False,
+            viewer_id="",
+        )
+
+    @router.get("/api/me/profile")
+    async def get_my_profile(request: Request, authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        identity_id = str(identity.get("id") or "").strip()
+        profile = auth_service.get_by_id(identity_id) if identity_id != "admin" else None
+        if profile is None:
+            admin_profile = config.get_admin_profile() if identity_id == "admin" else {}
+            profile = {
+                "id": identity_id or "admin",
+                "name": identity.get("name") or "管理员",
+                "role": identity.get("role") or "admin",
+                "quota": 0,
+                "used": 0,
+                "unlimited": True,
+                "remaining": None,
+                "qq": admin_profile.get("qq") or "",
+                "qq_bound_at": admin_profile.get("qq_bound_at"),
+            }
+        admin_ids = _admin_owner_ids()
+        owner_filter = "__admin__" if str(identity.get("role") or "") == "admin" or identity_id in admin_ids else identity_id
+        images = list_images(resolve_image_base_url(request), owner=owner_filter, admin_ids=admin_ids)
+        image_items = images.get("items", [])
+        image_count = len(image_items)
+        try:
+            profile_used = int(profile.get("used") or 0)
+        except (TypeError, ValueError):
+            profile_used = 0
+        if image_count > profile_used:
+            profile = dict(profile)
+            profile["used"] = image_count
+        return {
+            "profile": profile,
+            "image_count": image_count,
+            "images": image_items[:60],
+            "qq_callback_url": _qq_callback_url(request),
+            "qq_oauth_enabled": bool(str(config.get_qq_oauth_settings().get("app_id") or "").strip()),
+        }
+
+    @router.post("/api/me/qq-bind-url")
+    async def create_my_qq_bind_url(request: Request, authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        settings = config.get_qq_oauth_settings()
+        app_id = str(settings.get("app_id") or "").strip()
+        app_key = str(settings.get("app_key") or "").strip()
+        if not app_id or not app_key:
+            raise HTTPException(status_code=400, detail={"error": "后台未配置 QQ APP ID 或 APP Key"})
+        state = config.create_qq_oauth_state(identity, purpose="bind")
+        redirect_uri = _qq_callback_url(request)
+        authorize_url = "https://graph.qq.com/oauth2.0/authorize?" + urlencode(
+            {
+                "response_type": "code",
+                "client_id": app_id,
+                "redirect_uri": redirect_uri,
+                "state": state,
+                "scope": "get_user_info",
+            }
+        )
+        return {"authorize_url": authorize_url}
+
+    @router.post("/api/oauth/qq/login-url")
+    async def create_qq_login_url(request: Request):
+        settings = config.get_qq_oauth_settings()
+        app_id = str(settings.get("app_id") or "").strip()
+        app_key = str(settings.get("app_key") or "").strip()
+        if not app_id or not app_key:
+            raise HTTPException(status_code=400, detail={"error": "后台未配置 QQ APP ID 或 APP Key"})
+        invite_code = str(request.query_params.get("invite") or "").strip()
+        state = config.create_qq_oauth_state(purpose="login", invite_code=invite_code)
+        redirect_uri = _qq_callback_url(request)
+        authorize_url = "https://graph.qq.com/oauth2.0/authorize?" + urlencode(
+            {
+                "response_type": "code",
+                "client_id": app_id,
+                "redirect_uri": redirect_uri,
+                "state": state,
+                "scope": "get_user_info",
+            }
+        )
+        return {"authorize_url": authorize_url}
+
+    @router.get("/api/oauth/qq/callback")
+    async def qq_oauth_callback(request: Request, code: str = "", state: str = "", error: str = "", error_description: str = ""):
+        if error:
+            return _login_redirect(request, "error", message=error_description or error)
+        oauth_state = config.consume_qq_oauth_state(state)
+        if not oauth_state:
+            return _login_redirect(request, "error", message="QQ 授权状态已过期，请重新操作")
+        try:
+            openid = await run_in_threadpool(_exchange_qq_openid, code, _qq_callback_url(request))
+            if str(oauth_state.get("purpose") or "bind") == "login":
+                admin_profile = config.get_admin_profile()
+                if str(admin_profile.get("qq") or "").strip() == openid:
+                    token = config.create_qq_login_session({"id": "admin", "name": "管理员", "role": "admin"})
+                    return _login_redirect(request, "success", token=token)
+                profile = auth_service.get_by_qq(openid)
+                if profile is None:
+                    profile = _create_qq_user(openid)
+                    _apply_invite_reward(str(oauth_state.get("invite_code") or ""), str(profile.get("id") or ""))
+                token = config.create_qq_login_session(profile)
+                return _login_redirect(request, "success", token=token)
+            identity_id = str(oauth_state.get("identity_id") or "").strip()
+            if not identity_id or identity_id == "admin":
+                config.bind_admin_qq(openid)
+            else:
+                profile = auth_service.bind_qq(identity_id, openid)
+                if profile is None:
+                    return _profile_redirect(request, "error", "绑定账号不存在")
+        except Exception as exc:
+            target = str(oauth_state.get("purpose") or "bind")
+            if target == "login":
+                return _login_redirect(request, "error", message=str(exc))
+            return _profile_redirect(request, "error", str(exc))
+        return _profile_redirect(request, "success")
+
+    @router.post("/api/me/bind-qq")
+    async def bind_my_qq(body: QQBindRequest, authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        identity_id = str(identity.get("id") or "").strip()
+        if not identity_id or identity_id == "admin":
+            admin_profile = config.bind_admin_qq(body.qq)
+            return {
+                "profile": {
+                    "id": "admin",
+                    "name": identity.get("name") or "管理员",
+                    "role": identity.get("role") or "admin",
+                    "quota": 0,
+                    "used": 0,
+                    "unlimited": True,
+                    "remaining": None,
+                    "qq": admin_profile.get("qq") or "",
+                    "qq_bound_at": admin_profile.get("qq_bound_at"),
+                }
+            }
+        profile = auth_service.bind_qq(identity_id, body.qq)
+        if profile is None:
+            raise HTTPException(status_code=404, detail={"error": "账号不存在"})
+        return {"profile": profile}
 
     @router.get("/api/settings")
     async def get_settings(authorization: str | None = Header(default=None)):
@@ -269,6 +541,14 @@ def create_router(app_version: str) -> APIRouter:
         except BackupError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 
+    @router.post("/api/remote-storage/test")
+    async def test_remote_storage_connection(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"result": await run_in_threadpool(test_remote_storage)}
+        except RemoteStorageError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
     @router.get("/api/backups")
     async def get_backups(authorization: str | None = Header(default=None)):
         require_admin(authorization)
@@ -295,6 +575,23 @@ def create_router(app_version: str) -> APIRouter:
         try:
             await run_in_threadpool(backup_service.delete_backup, body.key)
             return {"ok": True}
+        except BackupError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.post("/api/backups/restore")
+    async def restore_backup_endpoint(body: BackupRestoreRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"result": await run_in_threadpool(backup_service.restore_backup, body.key)}
+        except BackupError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.post("/api/backups/import-local")
+    async def import_local_backup_endpoint(file: UploadFile = File(...), authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            payload = await file.read()
+            return {"result": await run_in_threadpool(backup_service.restore_backup_payload, payload, file.filename or "backup.tar.gz")}
         except BackupError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 

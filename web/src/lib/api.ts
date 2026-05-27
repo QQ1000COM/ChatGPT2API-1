@@ -52,6 +52,8 @@ type AccountUpdateResponse = {
 
 export type SettingsConfig = {
   proxy: string;
+  site_name?: string;
+  browser_title?: string;
   base_url?: string;
   global_system_prompt?: string;
   sensitive_words?: string[];
@@ -73,7 +75,34 @@ export type SettingsConfig = {
   log_levels?: string[];
   backup?: BackupSettings;
   backup_state?: BackupState;
+  remote_storage?: RemoteStorageSettings;
+  qq_oauth?: {
+    app_id?: string;
+    app_key?: string;
+    new_user_free_quota?: number | string;
+    invite_reward_quota?: number | string;
+  };
   [key: string]: unknown;
+};
+
+export type RemoteStorageSettings = {
+  enabled: boolean;
+  provider: "local" | "webdav" | "s3" | string;
+  path_prefix: string;
+  public_base_url: string;
+  delete_local_after_upload?: boolean;
+  webdav: {
+    url: string;
+    username: string;
+    password: string;
+  };
+  s3: {
+    endpoint: string;
+    region: string;
+    bucket: string;
+    access_key_id: string;
+    secret_access_key: string;
+  };
 };
 
 export type BackupInclude = {
@@ -83,6 +112,7 @@ export type BackupInclude = {
   sub2api: boolean;
   logs: boolean;
   image_tasks: boolean;
+  image_conversations?: boolean;
   accounts_snapshot: boolean;
   auth_keys_snapshot: boolean;
   images: boolean;
@@ -90,7 +120,7 @@ export type BackupInclude = {
 
 export type BackupSettings = {
   enabled: boolean;
-  provider: "cloudflare_r2" | string;
+  provider: "cloudflare_r2" | "webdav" | string;
   account_id: string;
   access_key_id: string;
   secret_access_key: string;
@@ -101,6 +131,11 @@ export type BackupSettings = {
   encrypt: boolean;
   passphrase: string;
   include: BackupInclude;
+  webdav?: {
+    url: string;
+    username: string;
+    password: string;
+  };
 };
 
 export type BackupState = {
@@ -180,7 +215,25 @@ export type SystemLog = {
 
 export type ImageResponse = {
   created: number;
-  data: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
+  data: Array<{ b64_json?: string; url?: string; local_url?: string; revised_prompt?: string }>;
+};
+
+export type MyProfile = {
+  profile: {
+    id: string;
+    name: string;
+    role: AuthRole;
+    quota: number;
+    used: number;
+    unlimited: boolean;
+    remaining: number | null;
+    qq?: string;
+    qq_bound_at?: string | null;
+  };
+  image_count: number;
+  images: ManagedImage[];
+  qq_callback_url: string;
+  qq_oauth_enabled: boolean;
 };
 
 export type ImageTask = {
@@ -191,8 +244,10 @@ export type ImageTask = {
   size?: string;
   created_at: string;
   updated_at: string;
-  data?: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
+  data?: Array<{ b64_json?: string; url?: string; local_url?: string; revised_prompt?: string }>;
   error?: string;
+  prompt?: string;
+  retry_count?: number;
 };
 
 type ImageTaskListResponse = {
@@ -205,6 +260,43 @@ type ImageTaskCancelResponse = {
   skipped: string[];
   missing_ids: string[];
 };
+
+export async function fetchImageConversations() {
+  return httpRequest<{ items: unknown[] }>("/api/image-conversations");
+}
+
+export async function replaceImageConversations(items: unknown[]) {
+  return httpRequest<{ items: unknown[] }>("/api/image-conversations", {
+    method: "PUT",
+    body: { items },
+  });
+}
+
+export async function upsertImageConversation(item: unknown) {
+  return httpRequest<{ item: unknown }>("/api/image-conversations", {
+    method: "POST",
+    body: item,
+  });
+}
+
+export async function renameServerImageConversation(id: string, title: string) {
+  return httpRequest<{ item: unknown | null }>(`/api/image-conversations/${encodeURIComponent(id)}/rename`, {
+    method: "POST",
+    body: { title },
+  });
+}
+
+export async function deleteServerImageConversation(id: string) {
+  return httpRequest<{ ok: boolean }>(`/api/image-conversations/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function clearServerImageConversations() {
+  return httpRequest<{ ok: boolean }>("/api/image-conversations", {
+    method: "DELETE",
+  });
+}
 
 export type LoginResponse = {
   ok: boolean;
@@ -425,8 +517,19 @@ export async function cancelImageTasks(ids: string[]) {
   });
 }
 
+export async function rerunImageTask(id: string) {
+  return httpRequest<ImageTask>(`/api/image-tasks/${encodeURIComponent(id)}/rerun`, {
+    method: "POST",
+    body: {},
+  });
+}
+
 export async function fetchSettingsConfig() {
   return httpRequest<{ config: SettingsConfig }>("/api/settings");
+}
+
+export async function fetchPublicConfig() {
+  return httpRequest<{ site_name: string; browser_title?: string; qq_oauth_enabled?: boolean; new_user_free_quota?: number; invite_reward_quota?: number }>("/api/public-config", { redirectOnUnauthorized: false });
 }
 
 export async function updateSettingsConfig(settings: SettingsConfig) {
@@ -438,6 +541,132 @@ export async function updateSettingsConfig(settings: SettingsConfig) {
 
 export async function testBackupConnection() {
   return httpRequest<{ result: { ok: boolean; status: number } }>("/api/backup/test", {
+    method: "POST",
+    body: {},
+  });
+}
+
+export async function fetchMyProfile() {
+  return httpRequest<MyProfile>("/api/me/profile");
+}
+
+export async function bindMyQQ(qq: string) {
+  return httpRequest<{ profile: MyProfile["profile"] }>("/api/me/bind-qq", {
+    method: "POST",
+    body: { qq },
+  });
+}
+
+export async function createQQBindUrl() {
+  return httpRequest<{ authorize_url: string }>("/api/me/qq-bind-url", {
+    method: "POST",
+    body: {},
+  });
+}
+
+export async function createQQLoginUrl(inviteCode = "") {
+  const params = new URLSearchParams();
+  if (inviteCode.trim()) params.set("invite", inviteCode.trim());
+  return httpRequest<{ authorize_url: string }>(`/api/oauth/qq/login-url${params.toString() ? `?${params.toString()}` : ""}`, {
+    method: "POST",
+    body: {},
+    redirectOnUnauthorized: false,
+  });
+}
+
+export async function fetchPublicCases() {
+  return httpRequest<{ items: GalleryItem[]; next_cursor: string }>("/api/public-cases", { redirectOnUnauthorized: false });
+}
+
+export type CommerceTemplate = {
+  id: string;
+  title: string;
+  description: string;
+  example_url: string;
+  prompt: string;
+  platform: string;
+  tool_url: string;
+  hidden: boolean;
+  sort: number;
+};
+
+export type HomeCase = {
+  id: string;
+  title: string;
+  image_url: string;
+  image_rel: string;
+  category: string;
+  hidden: boolean;
+  sort: number;
+};
+
+export async function fetchTemplates(includeHidden = false) {
+  return httpRequest<{ items: CommerceTemplate[] }>(`/api/templates${includeHidden ? "?include_hidden=true" : ""}`);
+}
+
+export async function saveTemplate(payload: Partial<CommerceTemplate>) {
+  return httpRequest<{ item: CommerceTemplate; items: CommerceTemplate[] }>("/api/templates", { method: "POST", body: payload });
+}
+
+export async function deleteTemplate(id: string) {
+  return httpRequest<{ items: CommerceTemplate[] }>(`/api/templates/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function fetchHomeCases(includeHidden = false) {
+  return httpRequest<{ items: HomeCase[] }>(`/api/home-cases${includeHidden ? "?include_hidden=true" : ""}`);
+}
+
+export async function fetchPublicHomeCases() {
+  return httpRequest<{ items: HomeCase[] }>("/api/public-home-cases", { redirectOnUnauthorized: false });
+}
+
+export async function saveHomeCase(payload: Partial<HomeCase>) {
+  return httpRequest<{ item: HomeCase; items: HomeCase[] }>("/api/home-cases", { method: "POST", body: payload });
+}
+
+export async function deleteHomeCase(id: string) {
+  return httpRequest<{ items: HomeCase[] }>(`/api/home-cases/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export type ImageFeedback = {
+  id: string;
+  image_rel: string;
+  favorite: boolean;
+  rating: number;
+  note: string;
+  template_id?: string;
+};
+
+export async function fetchMyFeedback() {
+  return httpRequest<{ items: ImageFeedback[] }>("/api/me/feedback");
+}
+
+export async function saveMyFeedback(payload: Partial<ImageFeedback>) {
+  return httpRequest<{ item: ImageFeedback; items: ImageFeedback[] }>("/api/me/feedback", { method: "POST", body: payload });
+}
+
+export async function fetchFeedbackStats() {
+  return httpRequest<{ items: Array<{ template_id: string; count: number; favorite_count: number; avg_rating: number }>; total: number }>("/api/feedback/stats");
+}
+
+export async function createImageShare(payload: { image_rel?: string; image_url?: string; title?: string; prompt?: string }) {
+  return httpRequest<{ item: { token: string; image_rel: string; image_url: string; title: string; prompt: string } }>("/api/me/shares", { method: "POST", body: payload });
+}
+
+export async function fetchImageShare(token: string) {
+  return httpRequest<{ item: { token: string; image_rel: string; image_url: string; title: string; prompt: string } }>(`/api/shares/${encodeURIComponent(token)}`, { redirectOnUnauthorized: false });
+}
+
+export async function fetchOnboarding() {
+  return httpRequest<{ state: { dismissed: boolean; owner_id: string } }>("/api/me/onboarding");
+}
+
+export async function saveOnboarding(dismissed: boolean) {
+  return httpRequest<{ state: { dismissed: boolean; owner_id: string } }>("/api/me/onboarding", { method: "POST", body: { dismissed } });
+}
+
+export async function testRemoteStorageConnection() {
+  return httpRequest<{ result: { ok: boolean; provider: string; status: number } }>("/api/remote-storage/test", {
     method: "POST",
     body: {},
   });
@@ -458,6 +687,22 @@ export async function deleteBackup(key: string) {
   return httpRequest<{ ok: boolean }>("/api/backups/delete", {
     method: "POST",
     body: { key },
+  });
+}
+
+export async function restoreBackup(key: string) {
+  return httpRequest<{ result: { restored: string[]; count: number } }>("/api/backups/restore", {
+    method: "POST",
+    body: { key },
+  });
+}
+
+export async function importLocalBackup(file: File) {
+  const formData = new FormData();
+  formData.append("file", file);
+  return httpRequest<{ result: { restored: string[]; count: number } }>("/api/backups/import-local", {
+    method: "POST",
+    body: formData,
   });
 }
 

@@ -53,6 +53,23 @@ def create_router() -> APIRouter:
         ids = [task_id.strip() for task_id in body.ids if task_id and task_id.strip()]
         return await run_in_threadpool(image_task_service.cancel_tasks, identity, ids)
 
+    @router.post("/api/image-tasks/{task_id}/rerun")
+    async def rerun_image_task(
+        task_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ):
+        identity = require_identity(authorization)
+        consume_user_quota(identity, 1)
+        try:
+            return await run_in_threadpool(image_task_service.rerun_task, identity, task_id, base_url=resolve_image_base_url(request))
+        except ValueError as exc:
+            refund_user_quota(identity, 1)
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        except HTTPException:
+            refund_user_quota(identity, 1)
+            raise
+
     @router.post("/api/image-tasks/generations")
     async def create_generation_task(
         body: ImageGenerationTaskRequest,

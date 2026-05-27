@@ -17,8 +17,8 @@ import { createImageEditTask, fetchImageTasks, type ImageTask } from "@/lib/api"
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 
-type WorkMode = "detail" | "main" | "white" | "resize";
-type UploadKind = "product" | "reference" | "resize";
+type WorkMode = "detail" | "main" | "buyer" | "white" | "resize";
+type UploadKind = "product" | "reference" | "background" | "resize";
 type JobStatus = "idle" | "queued" | "running" | "success" | "error" | "canceled";
 
 type UploadImage = {
@@ -43,6 +43,7 @@ type GeneratedItem = {
   status: JobStatus;
   taskId?: string;
   imageUrl?: string;
+  localImageUrl?: string;
   b64Json?: string;
   error?: string;
   sourceFile?: File;
@@ -61,6 +62,31 @@ const resizePresets: ResizePreset[] = [
   { id: "9:16", ratio: "9:16", label: "竖版", orientation: "竖版" },
 ];
 
+const buyerStyles = ["居家实拍", "街拍穿搭", "桌面开箱", "用户评价晒单", "种草笔记风", "真实买家随手拍"];
+const buyerCounts = [1, 2, 4, 6];
+const buyerRatios = ["1:1", "3:4", "4:5", "9:16"];
+const buyerHumanModes = ["不出现真人，只拍产品生活场景", "出现手部/半身", "出现模特穿搭/使用"];
+const buyerRealityLevels = ["精致", "自然", "随手拍", "很真实、有轻微瑕疵"];
+const buyerPlatforms = ["淘宝评价图", "小红书种草图", "抖音橱窗图", "亚马逊 Lifestyle", "Shopee/Lazada 买家秀"];
+const buyerBackgroundModes = [
+  {
+    id: "strict",
+    label: "严格一致",
+    prompt: "背景一致程度：严格一致。所有图片尽量保持同一张背景图的空间结构、光线、主要物体和拍摄位置，只允许轻微裁切和景深变化。",
+  },
+  {
+    id: "natural",
+    label: "自然变化",
+    prompt:
+      "背景一致程度：自然变化。把上传背景图理解为同一个空间，而不是同一张照片模板；所有图片仍在同一房间/同一车内/同一桌面环境中，但必须使用不同机位、不同裁切、不同焦段、不同商品摆放位置和不同手部/人物动作，避免看起来像复制同一张图。",
+  },
+  {
+    id: "extended",
+    label: "轻微延展",
+    prompt:
+      "背景一致程度：轻微延展。保留上传背景图的空间风格、材质、色温、主要家具/车内/桌面元素和生活氛围，允许合理延展同一空间的相邻角落、不同视角和自然遮挡，但不要跳到完全不同的场所。",
+  },
+];
 const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
 function createId() {
@@ -92,6 +118,9 @@ async function filesToUploadImages(files: File[]) {
 }
 
 function imageSource(item: GeneratedItem) {
+  if (item.localImageUrl) {
+    return item.localImageUrl;
+  }
   if (item.b64Json) {
     return `data:image/png;base64,${item.b64Json}`;
   }
@@ -106,6 +135,8 @@ function aspectClass(size: string) {
       return "aspect-[9/16]";
     case "4:3":
       return "aspect-[4/3]";
+    case "4:5":
+      return "aspect-[4/5]";
     case "3:4":
       return "aspect-[3/4]";
     default:
@@ -150,6 +181,7 @@ function applyTaskToItem(item: GeneratedItem, task: ImageTask): GeneratedItem {
       status: "success",
       taskId: task.id,
       imageUrl: first.url,
+      localImageUrl: first.local_url,
       b64Json: first.b64_json,
       error: undefined,
     };
@@ -319,6 +351,100 @@ function buildWhiteItems(form: Parameters<typeof basePrompt>[0], size: string): 
   }));
 }
 
+function buildBuyerItems(
+  form: Parameters<typeof basePrompt>[0] & { usageScene: string },
+  options: {
+    style: string;
+    count: number;
+    ratio: string;
+    humanMode: string;
+    reality: string;
+    platform: string;
+    consistentScene: boolean;
+    hasBackgroundImage: boolean;
+    backgroundMode: string;
+  },
+): GeneratedItem[] {
+  const product = form.productName.trim();
+  const category = form.category.trim() || "电商商品";
+  const sellingPoints = form.sellingPoints.trim() || "根据商品图片提炼真实卖点、材质、用途和使用体验";
+  const audience = form.audience.trim() || "目标买家";
+  const usageScene = form.usageScene.trim() || "日常真实使用场景";
+  const extra = form.extra.trim();
+  const sameStyle = form.sameStyle
+    ? "如果上传了买家秀参考图，请复刻参考图的构图、光线、拍摄距离、场景氛围、生活杂物密度和随手拍感觉，但必须替换成我上传的商品。"
+    : "参考图只作为风格灵感，不要照抄无关商品、人物身份或品牌元素。";
+  const consistentScene = options.consistentScene
+    ? `本批 ${options.count} 张买家秀必须保持同一个大场景和同一套环境氛围：${usageScene}。例如选择家里就每张都在家里不同角落，选择车里就每张都在车内不同角度；允许构图、距离、手部动作和细节不同，但不要跳到户外、街边、浴室、办公室等其他场景。`
+    : "本批图片可以根据每张主题切换自然场景，但都要符合商品和目标买家的真实使用逻辑。";
+  const backgroundImage = options.hasBackgroundImage
+    ? `已上传统一背景图：所有生成结果必须使用这张背景图作为同一处真实环境的视觉依据，商品、手部、半身或模特需要自然融入这张背景。${options.backgroundMode}`
+    : "";
+  const base = [
+    `为 ${options.platform} 生成真实买家秀图片。`,
+    `商品名：${product}`,
+    `类目：${category}`,
+    `商品卖点：${sellingPoints}`,
+    `目标人群：${audience}`,
+    `使用场景：${usageScene}`,
+    `买家秀风格：${options.style}`,
+    `真人模式：${options.humanMode}`,
+    `真实度：${options.reality}`,
+    extra ? `补充要求：${extra}` : "",
+    sameStyle,
+    consistentScene,
+    backgroundImage,
+    "必须严格参考上传的多角度商品图，保持商品外观、结构、颜色、材质、比例、Logo/纹理位置一致。",
+    "手机拍摄感，自然光，轻微生活杂乱，不要太完美，不要夸张摆拍，商品必须真实出现并清楚可见。",
+    "可以使用手持、桌面、衣架、床边、客厅、厨房、通勤、户外等自然场景，画面像真实买家随手拍。",
+    "不要生成电商海报文字、促销字、二维码、水印、虚假品牌 Logo、虚假认证、夸大承诺或平台官方标识。",
+    "如果必须出现少量文字，只能是自然评价晒单氛围里的短中文，不要占画面主体。",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const scenes = [
+    {
+      title: "买家秀 01 开箱图",
+      subtitle: "包装/桌面/刚收到",
+      prompt: "生成开箱买家秀：商品刚拆开或放在桌面/床边，包装、配件、日常杂物自然入镜，光线真实，像买家收到货后随手拍。",
+    },
+    {
+      title: "买家秀 02 上身/使用图",
+      subtitle: "真实使用状态",
+      prompt: "生成上身或使用买家秀：按照真人模式展示商品被真实使用，动作自然，不摆拍，重点看清商品外观和使用方式。",
+    },
+    {
+      title: "买家秀 03 细节图",
+      subtitle: "材质/纹理/局部",
+      prompt: "生成细节买家秀：近距离拍摄商品材质、纹理、接口、边缘、做工或关键结构，背景保持生活化，不做棚拍广告感。",
+    },
+    {
+      title: "买家秀 04 场景图",
+      subtitle: "生活方式氛围",
+      prompt: "生成场景买家秀：把商品放入目标买家的真实生活场景中，环境自然有一点生活痕迹，商品仍是画面关注点。",
+    },
+    {
+      title: "买家秀 05 评价晒单图",
+      subtitle: "评价/晒单感",
+      prompt: "生成评价晒单买家秀：像淘宝评价或小红书真实分享图片，构图随手但清楚，允许轻微不完美，不要做成广告海报。",
+    },
+    {
+      title: "买家秀 06 对比图",
+      subtitle: "使用前后/尺寸感",
+      prompt: "生成对比买家秀：通过生活物件、手部、桌面或使用前后关系体现尺寸感、效果差异或购买理由，真实克制，不夸张宣传。",
+    },
+  ];
+
+  return scenes.slice(0, options.count).map((scene) => ({
+    id: createId(),
+    title: scene.title,
+    subtitle: `${options.platform} / ${options.style}`,
+    size: options.ratio,
+    prompt: `${base}\n\n${scene.prompt}\n画面比例必须适配 ${options.ratio}。只生成这一张买家秀图，不要拼图，不要生成多张图。`,
+    status: "idle",
+  }));
+}
+
 function buildResizeItems(images: UploadImage[], selectedRatios: string[]): GeneratedItem[] {
   const presets = resizePresets.filter((preset) => selectedRatios.includes(preset.id));
   return images.flatMap((image, imageIndex) =>
@@ -419,10 +545,12 @@ export default function DetailPageGenerator() {
   const { isCheckingAuth, session } = useAuthGuard();
   const productInputRef = useRef<HTMLInputElement>(null);
   const referenceInputRef = useRef<HTMLInputElement>(null);
+  const backgroundInputRef = useRef<HTMLInputElement>(null);
   const resizeInputRef = useRef<HTMLInputElement>(null);
   const [mode, setMode] = useState<WorkMode>("detail");
   const [productImages, setProductImages] = useState<UploadImage[]>([]);
   const [referenceImages, setReferenceImages] = useState<UploadImage[]>([]);
+  const [backgroundImages, setBackgroundImages] = useState<UploadImage[]>([]);
   const [resizeImages, setResizeImages] = useState<UploadImage[]>([]);
   const [productName, setProductName] = useState("");
   const [category, setCategory] = useState("");
@@ -434,19 +562,45 @@ export default function DetailPageGenerator() {
   const [audience, setAudience] = useState("");
   const [priceBand, setPriceBand] = useState("");
   const [extra, setExtra] = useState("");
+  const [usageScene, setUsageScene] = useState("");
   const [sameStyle, setSameStyle] = useState(true);
+  const [buyerStyle, setBuyerStyle] = useState(buyerStyles[0]);
+  const [buyerCount, setBuyerCount] = useState(4);
+  const [buyerRatio, setBuyerRatio] = useState("4:5");
+  const [buyerHumanMode, setBuyerHumanMode] = useState(buyerHumanModes[0]);
+  const [buyerReality, setBuyerReality] = useState(2);
+  const [buyerPlatform, setBuyerPlatform] = useState(buyerPlatforms[0]);
+  const [buyerConsistentScene, setBuyerConsistentScene] = useState(true);
+  const [buyerBackgroundMode, setBuyerBackgroundMode] = useState("natural");
   const [items, setItems] = useState<GeneratedItem[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [regeneratingItemIds, setRegeneratingItemIds] = useState<string[]>([]);
-  const [selectedResizeRatios, setSelectedResizeRatios] = useState<string[]>(["1:1"]);
+  const [selectedResizeRatios, setSelectedResizeRatios] = useState<string[]>([]);
 
   const allFiles = useMemo(
     () => [...productImages.map((image) => image.file), ...referenceImages.map((image) => image.file)],
     [productImages, referenceImages],
   );
+  const buyerFiles = useMemo(
+    () => [
+      ...productImages.map((image) => image.file),
+      ...referenceImages.map((image) => image.file),
+      ...backgroundImages.map((image) => image.file),
+    ],
+    [backgroundImages, productImages, referenceImages],
+  );
   const completeCount = items.filter((item) => item.status === "success").length;
   const activeCount = items.filter((item) => item.status === "queued" || item.status === "running").length;
-  const totalCount = mode === "detail" ? 6 : mode === "main" ? 3 : mode === "white" ? 2 : resizeImages.length * selectedResizeRatios.length;
+  const totalCount =
+    mode === "detail"
+      ? 6
+      : mode === "main"
+        ? 3
+        : mode === "buyer"
+          ? buyerCount
+          : mode === "white"
+            ? 2
+            : resizeImages.length * selectedResizeRatios.length;
   const canStitchDetail =
     mode === "detail" && items.length === 6 && items.every((item) => item.status === "success" && imageSource(item));
 
@@ -457,6 +611,8 @@ export default function DetailPageGenerator() {
       setProductImages((prev) => [...prev, ...images].slice(0, 10));
     } else if (kind === "reference") {
       setReferenceImages((prev) => [...prev, ...images].slice(0, 10));
+    } else if (kind === "background") {
+      setBackgroundImages(images.slice(0, 1));
     } else {
       setResizeImages((prev) => [...prev, ...images].slice(0, 20));
     }
@@ -467,6 +623,8 @@ export default function DetailPageGenerator() {
       setProductImages((prev) => prev.filter((item) => item.id !== id));
     } else if (kind === "reference") {
       setReferenceImages((prev) => prev.filter((item) => item.id !== id));
+    } else if (kind === "background") {
+      setBackgroundImages((prev) => prev.filter((item) => item.id !== id));
     } else {
       setResizeImages((prev) => prev.filter((item) => item.id !== id));
     }
@@ -483,10 +641,12 @@ export default function DetailPageGenerator() {
       status: "queued",
       error: undefined,
       imageUrl: undefined,
+      localImageUrl: undefined,
       b64Json: undefined,
     }));
     try {
-      const taskPrefix = mode === "detail" ? "detail" : mode === "main" ? "main" : mode === "white" ? "white" : "resize";
+      const taskPrefix =
+        mode === "detail" ? "detail" : mode === "main" ? "main" : mode === "buyer" ? "buyer" : mode === "white" ? "white" : "resize";
       const taskId = `${taskPrefix}-${createId()}`;
       const taskFiles =
         mode === "resize"
@@ -495,7 +655,9 @@ export default function DetailPageGenerator() {
             : []
           : mode === "white"
             ? productImages.map((image) => image.file)
-            : allFiles;
+            : mode === "buyer"
+              ? buyerFiles
+              : allFiles;
       const submitted = await createImageEditTask(taskId, taskFiles, item.prompt, "gpt-image-2", item.size);
       updateItem(item.id, (current) => applyTaskToItem(current, submitted));
       const finished = await pollTask(submitted.id);
@@ -558,6 +720,7 @@ export default function DetailPageGenerator() {
       audience,
       priceBand,
       extra,
+      usageScene,
       sameStyle,
     };
     const nextItems =
@@ -565,7 +728,19 @@ export default function DetailPageGenerator() {
         ? buildDetailItems(form, "3:4")
         : mode === "main"
           ? buildMainItems(form, "1:1")
-          : buildWhiteItems(form, "1:1");
+          : mode === "buyer"
+            ? buildBuyerItems(form, {
+                style: buyerStyle,
+                count: buyerCount,
+                ratio: buyerRatio,
+                humanMode: buyerHumanMode,
+                reality: buyerRealityLevels[buyerReality] || buyerRealityLevels[2],
+                platform: buyerPlatform,
+                consistentScene: buyerConsistentScene,
+                hasBackgroundImage: backgroundImages.length > 0,
+                backgroundMode: buyerBackgroundModes.find((item) => item.id === buyerBackgroundMode)?.prompt || buyerBackgroundModes[1].prompt,
+              })
+            : buildWhiteItems(form, "1:1");
     setItems(nextItems);
     setIsGenerating(true);
     try {
@@ -575,7 +750,9 @@ export default function DetailPageGenerator() {
           ? "6 张分页详情页生成流程已结束"
           : mode === "main"
             ? "爆款主图复刻生成流程已结束"
-            : "白底图生成流程已结束",
+            : mode === "buyer"
+              ? "买家秀生成流程已结束"
+              : "白底图生成流程已结束",
       );
     } finally {
       setIsGenerating(false);
@@ -667,13 +844,23 @@ export default function DetailPageGenerator() {
   }
 
   const pageTitle =
-    mode === "detail" ? "AI 详情页" : mode === "main" ? "爆款主图" : mode === "white" ? "白底图" : "尺寸转换";
+    mode === "detail"
+      ? "AI 详情页"
+      : mode === "main"
+        ? "爆款主图"
+        : mode === "buyer"
+          ? "一键拍买家秀"
+          : mode === "white"
+            ? "白底图"
+            : "尺寸转换";
   const pageSubTitle =
     mode === "detail"
       ? "上传商品，一键生成 6 张分页详情页"
       : mode === "main"
         ? "上传爆款参考图，一键复刻 3 张主图"
-        : mode === "white"
+        : mode === "buyer"
+          ? "上传商品图和买家秀参考图，一键生成真实晒单图片"
+          : mode === "white"
           ? "上传商品图，一键生成精修白底图和 3D 白底图"
           : "上传图片，选择平台规格，一键导出多尺寸素材";
   const referenceTitle =
@@ -681,7 +868,9 @@ export default function DetailPageGenerator() {
       ? "参考图 / 同款风格图"
       : mode === "main"
         ? "爆款主图参考图"
-        : mode === "white"
+        : mode === "buyer"
+          ? "买家秀参考图（可选）"
+          : mode === "white"
           ? "白底参考图（可选）"
           : "尺寸转换";
   const resultTitle =
@@ -689,7 +878,9 @@ export default function DetailPageGenerator() {
       ? "详情页分页结果"
       : mode === "main"
         ? "爆款主图复刻结果"
-        : mode === "white"
+        : mode === "buyer"
+          ? "买家秀生成结果"
+          : mode === "white"
           ? "白底图生成结果"
           : "AI 尺寸生成结果";
   const emptyText =
@@ -697,7 +888,9 @@ export default function DetailPageGenerator() {
       ? "上传商品图、参考图并输入商品信息后，点击生成 6 张分页详情页。"
       : mode === "main"
         ? "上传商品图、爆款参考图并输入商品信息后，点击生成爆款主图。"
-        : mode === "white"
+        : mode === "buyer"
+          ? "上传多角度商品图，选择风格、真人模式、平台模板和数量后，一键生成真实买家秀。"
+          : mode === "white"
           ? "上传商品图并输入商品信息后，点击生成精修白底图和 3D 白底图。"
           : "上传图片并选择比例后，点击 AI 生成尺寸图。";
 
@@ -720,6 +913,13 @@ export default function DetailPageGenerator() {
         onChange={(event) => void addImages("reference", Array.from(event.target.files || []))}
       />
       <input
+        ref={backgroundInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(event) => void addImages("background", Array.from(event.target.files || []))}
+      />
+      <input
         ref={resizeInputRef}
         type="file"
         accept="image/*"
@@ -738,6 +938,16 @@ export default function DetailPageGenerator() {
                 onPick={() => referenceInputRef.current?.click()}
                 onRemove={(id) => removeImage("reference", id)}
               />
+              {mode === "buyer" ? (
+                <div className="mt-4">
+                  <UploadStrip
+                    title="统一背景图（可选，上传后整批买家秀使用同一背景）"
+                    images={backgroundImages}
+                    onPick={() => backgroundInputRef.current?.click()}
+                    onRemove={(id) => removeImage("background", id)}
+                  />
+                </div>
+              ) : null}
             </div>
           )}
 
@@ -746,6 +956,7 @@ export default function DetailPageGenerator() {
               {[
                 ["detail", "详情页分页"],
                 ["main", "爆款主图"],
+                ["buyer", "买家秀"],
                 ["white", "白底图"],
                 ["resize", "尺寸转换"],
               ].map(([value, label]) => (
@@ -848,27 +1059,127 @@ export default function DetailPageGenerator() {
               className="mt-3 min-h-40 w-full resize-none rounded-2xl border border-input bg-background px-4 py-3 text-sm leading-6 outline-none placeholder:text-muted-foreground focus:border-foreground"
             />
 
-            <div className="mt-3 grid gap-3 sm:grid-cols-4">
-              {[
-                [platform, setPlatform, platforms],
-                [region, setRegion, regions],
-                [language, setLanguage, languages],
-                [style, setStyle, styles],
-              ].map(([value, setter, options], index) => (
-                <select
-                  key={index}
-                  value={value as string}
-                  onChange={(event) => (setter as (value: string) => void)(event.target.value)}
-                  className="h-10 rounded-2xl border border-input bg-background px-3 text-sm outline-none focus:border-foreground"
-                >
-                  {(options as string[]).map((option) => (
-                    <option key={option} value={option}>
-                      {option}
-                    </option>
-                  ))}
-                </select>
-              ))}
-            </div>
+            {mode === "buyer" ? (
+              <div className="mt-3 space-y-3 rounded-2xl border border-border bg-background p-3">
+                <div className="grid gap-3 sm:grid-cols-4">
+                  <select
+                    value={buyerPlatform}
+                    onChange={(event) => setBuyerPlatform(event.target.value)}
+                    className="h-10 rounded-2xl border border-input bg-card px-3 text-sm outline-none focus:border-foreground"
+                  >
+                    {buyerPlatforms.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    value={buyerStyle}
+                    onChange={(event) => setBuyerStyle(event.target.value)}
+                    className="h-10 rounded-2xl border border-input bg-card px-3 text-sm outline-none focus:border-foreground"
+                  >
+                    {buyerStyles.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    value={buyerCount}
+                    onChange={(event) => setBuyerCount(Number(event.target.value))}
+                    className="h-10 rounded-2xl border border-input bg-card px-3 text-sm outline-none focus:border-foreground"
+                  >
+                    {buyerCounts.map((option) => (
+                      <option key={option} value={option}>
+                        {option} 张
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    value={buyerRatio}
+                    onChange={(event) => setBuyerRatio(event.target.value)}
+                    className="h-10 rounded-2xl border border-input bg-card px-3 text-sm outline-none focus:border-foreground"
+                  >
+                    {buyerRatios.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-[1fr_1fr]">
+                  <select
+                    value={buyerHumanMode}
+                    onChange={(event) => setBuyerHumanMode(event.target.value)}
+                    className="h-10 rounded-2xl border border-input bg-card px-3 text-sm outline-none focus:border-foreground"
+                  >
+                    {buyerHumanModes.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    value={buyerBackgroundMode}
+                    onChange={(event) => setBuyerBackgroundMode(event.target.value)}
+                    className="h-10 rounded-2xl border border-input bg-card px-3 text-sm outline-none focus:border-foreground"
+                    disabled={backgroundImages.length === 0}
+                  >
+                    {buyerBackgroundModes.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        背景一致：{option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-[1fr_1fr]">
+                  <div className="rounded-2xl border border-input bg-card px-3 py-2">
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span>真实度</span>
+                      <span className="font-semibold text-foreground">{buyerRealityLevels[buyerReality]}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={3}
+                      step={1}
+                      value={buyerReality}
+                      onChange={(event) => setBuyerReality(Number(event.target.value))}
+                      className="mt-1 w-full accent-foreground"
+                    />
+                  </div>
+                  <div className="rounded-2xl border border-input bg-card px-3 py-2 text-xs leading-5 text-muted-foreground">
+                    {backgroundImages.length > 0
+                      ? "上传背景图后，建议使用“自然变化”：同一空间不同机位，避免每张太像。"
+                      : "上传统一背景图后，可选择背景一致程度。"}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-3 grid gap-3 sm:grid-cols-4">
+                {[
+                  [platform, setPlatform, platforms],
+                  [region, setRegion, regions],
+                  [language, setLanguage, languages],
+                  [style, setStyle, styles],
+                ].map(([value, setter, options], index) => (
+                  <select
+                    key={index}
+                    value={value as string}
+                    onChange={(event) => (setter as (value: string) => void)(event.target.value)}
+                    className="h-10 rounded-2xl border border-input bg-background px-3 text-sm outline-none focus:border-foreground"
+                  >
+                    {(options as string[]).map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                ))}
+              </div>
+            )}
 
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
               <input
@@ -878,9 +1189,9 @@ export default function DetailPageGenerator() {
                 className="h-10 rounded-2xl border border-input bg-background px-4 text-sm outline-none placeholder:text-muted-foreground focus:border-foreground"
               />
               <input
-                value={priceBand}
-                onChange={(event) => setPriceBand(event.target.value)}
-                placeholder="价格/定位，例如：中高端、性价比、礼盒款"
+                value={mode === "buyer" ? usageScene : priceBand}
+                onChange={(event) => (mode === "buyer" ? setUsageScene(event.target.value) : setPriceBand(event.target.value))}
+                placeholder={mode === "buyer" ? "使用场景，例如：客厅听歌、通勤穿搭、桌面办公、户外露营" : "价格/定位，例如：中高端、性价比、礼盒款"}
                 className="h-10 rounded-2xl border border-input bg-background px-4 text-sm outline-none placeholder:text-muted-foreground focus:border-foreground"
               />
             </div>
@@ -893,22 +1204,37 @@ export default function DetailPageGenerator() {
                   ? "补充要求，例如：描述用英文、参考图同款版式、偏儿童换装卡片风..."
                   : mode === "main"
                     ? "补充要求，例如：复刻参考图构图、主图更高端、保留促销留白..."
-                    : "补充要求，例如：阴影更轻、产品更居中、保留原始颜色、增加金属质感..."
+                    : mode === "buyer"
+                      ? "补充要求，例如：更像手机随手拍、床边自然光、不要文字、参考图同款姿势..."
+                      : "补充要求，例如：阴影更轻、产品更居中、保留原始颜色、增加金属质感..."
               }
               className="mt-3 h-10 w-full rounded-2xl border border-input bg-background px-4 text-sm outline-none placeholder:text-muted-foreground focus:border-foreground"
             />
 
             <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
               {mode !== "white" ? (
-                <label className="inline-flex cursor-pointer items-center gap-2 rounded-full bg-secondary px-3 py-2 text-sm text-muted-foreground">
-                  <input
-                    type="checkbox"
-                    checked={sameStyle}
-                    onChange={(event) => setSameStyle(event.target.checked)}
-                    className="size-4 accent-foreground"
-                  />
-                  一键同款参考图版式
-                </label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="inline-flex cursor-pointer items-center gap-2 rounded-full bg-secondary px-3 py-2 text-sm text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={sameStyle}
+                      onChange={(event) => setSameStyle(event.target.checked)}
+                      className="size-4 accent-foreground"
+                    />
+                    {mode === "buyer" ? "同款参考复刻" : "一键同款参考图版式"}
+                  </label>
+                  {mode === "buyer" ? (
+                    <label className="inline-flex cursor-pointer items-center gap-2 rounded-full bg-secondary px-3 py-2 text-sm text-muted-foreground">
+                      <input
+                        type="checkbox"
+                        checked={buyerConsistentScene}
+                        onChange={(event) => setBuyerConsistentScene(event.target.checked)}
+                        className="size-4 accent-foreground"
+                      />
+                      场景保持一致
+                    </label>
+                  ) : null}
+                </div>
               ) : (
                 <span />
               )}
@@ -919,7 +1245,13 @@ export default function DetailPageGenerator() {
                 className="rounded-full bg-foreground px-5 font-bold text-background hover:bg-foreground/90"
               >
                 {isGenerating ? <LoaderCircle className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
-                {mode === "detail" ? "生成 6 张分页详情页" : mode === "main" ? "复刻 3 张爆款主图" : "生成 2 张白底图"}
+                {mode === "detail"
+                  ? "生成 6 张分页详情页"
+                  : mode === "main"
+                    ? "复刻 3 张爆款主图"
+                    : mode === "buyer"
+                      ? `生成 ${buyerCount} 张买家秀`
+                      : "生成 2 张白底图"}
               </Button>
             </div>
               </>
@@ -1019,7 +1351,16 @@ export default function DetailPageGenerator() {
                       </div>
                       <div className={cn("bg-muted", aspectClass(item.size))}>
                         {src ? (
-                          <img src={src} alt={item.title} className="h-full w-full object-cover" />
+                          <img
+                            src={src}
+                            alt={item.title}
+                            className="h-full w-full object-cover"
+                            onError={(event) => {
+                              if (item.imageUrl && event.currentTarget.src !== item.imageUrl) {
+                                event.currentTarget.src = item.imageUrl;
+                              }
+                            }}
+                          />
                         ) : (
                           <div className="grid h-full place-items-center px-5 text-center text-xs leading-5 text-muted-foreground">
                             {item.status === "queued" || item.status === "running" ? (

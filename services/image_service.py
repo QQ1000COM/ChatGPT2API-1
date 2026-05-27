@@ -13,6 +13,7 @@ from services.config import config
 from services.image_owners_service import load_owners, remove_owners
 from services.image_prompts_service import load_prompts, remove_prompts
 from services.image_tags_service import load_tags, remove_tags
+from services.remote_image_index_service import list_remote_images, remove_remote_images
 
 THUMBNAIL_SIZE = (320, 320)
 
@@ -160,6 +161,38 @@ def _image_items(start_date: str = "", end_date: str = "", owner: str = "", admi
             **({"width": dimensions[0], "height": dimensions[1]} if dimensions else {}),
         })
     items.sort(key=lambda item: str(item["created_at"]), reverse=True)
+    local_rels = {str(item.get("path") or "") for item in items}
+    for remote in list_remote_images():
+        rel = str(remote.get("rel") or remote.get("path") or "").strip().lstrip("/")
+        if not rel or rel in local_rels:
+            continue
+        if owner_filter:
+            owner_id = owners_map.get(rel, "")
+            if owner_filter == "__unowned__":
+                if owner_id:
+                    continue
+            elif owner_filter == "__admin__":
+                if owner_id not in admin_set:
+                    continue
+            elif owner_id != owner_filter:
+                continue
+        day = str(remote.get("date") or "")
+        if start_date and day and day < start_date:
+            continue
+        if end_date and day and day > end_date:
+            continue
+        items.append({
+            "rel": rel,
+            "path": rel,
+            "name": str(remote.get("name") or Path(rel).name),
+            "date": day or str(remote.get("created_at") or "")[:10],
+            "size": int(remote.get("size") or 0),
+            "created_at": str(remote.get("created_at") or ""),
+            "url": str(remote.get("url") or ""),
+            "thumbnail_url": str(remote.get("thumbnail_url") or remote.get("url") or ""),
+            **({"width": int(remote.get("width")), "height": int(remote.get("height"))} if remote.get("width") and remote.get("height") else {}),
+        })
+    items.sort(key=lambda item: str(item["created_at"]), reverse=True)
     return items
 
 
@@ -182,8 +215,8 @@ def list_images(
         owner_id = owners_map.get(rel, "")
         items.append({
             **item,
-            "url": f"{base_url.rstrip('/')}/images/{rel}",
-            "thumbnail_url": thumbnail_url(base_url, rel),
+            "url": str(item.get("url") or "") or f"{base_url.rstrip('/')}/images/{rel}",
+            "thumbnail_url": str(item.get("thumbnail_url") or "") or thumbnail_url(base_url, rel),
             "tags": all_tags.get(rel, []),
             "owner_id": owner_id,
             # 标记给前端：admin 桶里的图都用同一种 badge 文案"管理员"，不暴露具体 admin id
@@ -228,9 +261,13 @@ def delete_images(
             remove_tags(item)
             cleared_rels.append(item)
             removed += 1
+        else:
+            cleared_rels.append(item)
+            removed += 1
     if cleared_rels:
         remove_owners(cleared_rels)
         remove_prompts(cleared_rels)
+        remove_remote_images(cleared_rels)
     _cleanup_empty_dirs(root)
     _cleanup_empty_dirs(config.image_thumbnails_dir)
     return {"removed": removed}

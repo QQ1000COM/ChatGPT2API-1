@@ -29,7 +29,7 @@ def _legacy_admin_identity(token: str) -> dict[str, object] | None:
 
 def require_identity(authorization: str | None) -> dict[str, object]:
     token = extract_bearer_token(authorization)
-    identity = _legacy_admin_identity(token) or auth_service.authenticate(token)
+    identity = _legacy_admin_identity(token) or auth_service.authenticate(token) or config.get_qq_login_identity(token)
     if identity is None:
         raise HTTPException(status_code=401, detail={"error": "密钥无效或已失效，请重新登录"})
     return identity
