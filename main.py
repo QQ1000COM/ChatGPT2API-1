@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import uvicorn
+
+from services.db_tunnel import start_database_ssh_tunnel_from_env
+
+start_database_ssh_tunnel_from_env()
+
 from api import create_app
 
 app = create_app()
