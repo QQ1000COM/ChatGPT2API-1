@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 from typing import Iterable
 
-import httpx
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 
@@ -40,6 +39,8 @@ def should_proxy_path(path: str, prefixes: Iterable[str] = DEFAULT_PREFIXES) -> 
 
 
 async def proxy_remote_data_request(request: Request, base_url: str) -> Response:
+    import httpx
+
     target_url = f"{base_url}{request.url.path}"
     if request.url.query:
         target_url = f"{target_url}?{request.url.query}"
