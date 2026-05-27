@@ -437,6 +437,7 @@ export default function DetailPageGenerator() {
   const [sameStyle, setSameStyle] = useState(true);
   const [items, setItems] = useState<GeneratedItem[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [regeneratingItemIds, setRegeneratingItemIds] = useState<string[]>([]);
   const [selectedResizeRatios, setSelectedResizeRatios] = useState<string[]>(["1:1"]);
 
   const allFiles = useMemo(
@@ -476,10 +477,17 @@ export default function DetailPageGenerator() {
   };
 
   const runItemTask = async (item: GeneratedItem) => {
-    updateItem(item.id, (current) => ({ ...current, status: "queued", error: undefined }));
+    let succeeded = false;
+    updateItem(item.id, (current) => ({
+      ...current,
+      status: "queued",
+      error: undefined,
+      imageUrl: undefined,
+      b64Json: undefined,
+    }));
     try {
       const taskPrefix = mode === "detail" ? "detail" : mode === "main" ? "main" : mode === "white" ? "white" : "resize";
-      const taskId = `${taskPrefix}-${item.id}`;
+      const taskId = `${taskPrefix}-${createId()}`;
       const taskFiles =
         mode === "resize"
           ? item.sourceFile
@@ -491,6 +499,7 @@ export default function DetailPageGenerator() {
       const submitted = await createImageEditTask(taskId, taskFiles, item.prompt, "gpt-image-2", item.size);
       updateItem(item.id, (current) => applyTaskToItem(current, submitted));
       const finished = await pollTask(submitted.id);
+      succeeded = finished.status === "success";
       updateItem(item.id, (current) => applyTaskToItem(current, finished));
     } catch (error) {
       updateItem(item.id, (current) => ({
@@ -499,6 +508,7 @@ export default function DetailPageGenerator() {
         error: error instanceof Error ? error.message : "生成失败",
       }));
     }
+    return succeeded;
   };
 
   const handleGenerate = async () => {
@@ -575,6 +585,7 @@ export default function DetailPageGenerator() {
   const handleModeChange = (nextMode: WorkMode) => {
     setMode(nextMode);
     setItems([]);
+    setRegeneratingItemIds([]);
   };
 
   const toggleResizeRatio = (id: string) => {
@@ -617,6 +628,33 @@ export default function DetailPageGenerator() {
       toast.success("详情页长图已合成下载");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "详情页长图合成失败");
+    }
+  };
+
+  const handleRegenerateItem = async (item: GeneratedItem) => {
+    if (item.status === "queued" || item.status === "running" || regeneratingItemIds.includes(item.id)) {
+      return;
+    }
+    if (mode === "resize") {
+      if (!item.sourceFile) {
+        toast.error("这张图的原图不存在，请重新上传");
+        return;
+      }
+    } else if (productImages.length === 0) {
+      toast.error("请先保留至少一张商品图");
+      return;
+    }
+
+    setRegeneratingItemIds((prev) => [...prev, item.id]);
+    try {
+      const ok = await runItemTask(item);
+      if (ok) {
+        toast.success(`${item.title} 已重新生成`);
+      } else {
+        toast.error(`${item.title} 重新生成失败`);
+      }
+    } finally {
+      setRegeneratingItemIds((prev) => prev.filter((id) => id !== item.id));
     }
   };
 
@@ -948,6 +986,8 @@ export default function DetailPageGenerator() {
               ) : (
                 items.map((item) => {
                   const src = imageSource(item);
+                  const isItemRegenerating =
+                    regeneratingItemIds.includes(item.id) || item.status === "queued" || item.status === "running";
                   return (
                     <div key={item.id} className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
                       <div className="flex items-center justify-between gap-2 px-3 py-2">
@@ -997,14 +1037,30 @@ export default function DetailPageGenerator() {
                         <span className="min-w-0 truncate text-[11px] text-muted-foreground">
                           {item.taskId ? `任务ID：${item.taskId}` : "未提交"}
                         </span>
-                        <button
-                          type="button"
-                          onClick={() => downloadItem(item)}
-                          disabled={item.status !== "success"}
-                          className="inline-flex size-8 shrink-0 items-center justify-center rounded-full bg-foreground text-background disabled:bg-secondary disabled:text-muted-foreground"
-                        >
-                          <Download className="size-4" />
-                        </button>
+                        <div className="flex shrink-0 items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void handleRegenerateItem(item)}
+                            disabled={isGenerating || isItemRegenerating}
+                            title="单张重新生成"
+                            className="inline-flex size-8 items-center justify-center rounded-full bg-secondary text-foreground transition hover:bg-muted disabled:text-muted-foreground"
+                          >
+                            {isItemRegenerating ? (
+                              <LoaderCircle className="size-4 animate-spin" />
+                            ) : (
+                              <RefreshCw className="size-4" />
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => downloadItem(item)}
+                            disabled={item.status !== "success"}
+                            title="下载"
+                            className="inline-flex size-8 items-center justify-center rounded-full bg-foreground text-background disabled:bg-secondary disabled:text-muted-foreground"
+                          >
+                            <Download className="size-4" />
+                          </button>
+                        </div>
                       </div>
                     </div>
                   );
