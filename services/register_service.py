@@ -41,6 +41,11 @@ def _normalize(raw: dict) -> dict:
     return cfg
 
 
+def _proxy_label(proxy: str) -> str:
+    candidate = str(proxy or "").strip()
+    return candidate if candidate else "本机网络直连"
+
+
 class RegisterService:
     def __init__(self, store_file: Path):
         self._store_file = store_file
@@ -89,6 +94,7 @@ class RegisterService:
             self._save()
             self._runner = threading.Thread(target=self._run, daemon=True, name="openai-register")
             self._runner.start()
+            self._append_log(f"注册网络：{_proxy_label(self._config.get('proxy') or '')}", "yellow")
             self._append_log(f"注册任务启动，模式={self._config['mode']}，线程数={self._config['threads']}", "yellow")
             return self.get()
 

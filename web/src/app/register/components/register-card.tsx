@@ -372,7 +372,8 @@ export function RegisterCard() {
             </div>
             <div className="space-y-1.5">
               <label className="font-data text-[10px] font-semibold tracking-[0.16em] text-muted-foreground uppercase">注册代理</label>
-              <Input value={config.proxy} onChange={(event) => setProxy(event.target.value)} placeholder="http://127.0.0.1:7890" className="h-10 rounded-lg border-border bg-background font-data text-[13px]" disabled={config.enabled} />
+              <Input value={config.proxy} onChange={(event) => setProxy(event.target.value)} placeholder="留空使用本机网络，不走代理" className="h-10 rounded-lg border-border bg-background font-data text-[13px]" disabled={config.enabled} />
+              <p className="text-xs text-muted-foreground">只有填写代理地址时才使用代理，例如 http://127.0.0.1:7890。</p>
             </div>
             <div className="space-y-1.5">
               <label className="font-data text-[10px] font-semibold tracking-[0.16em] text-muted-foreground uppercase">目标剩余额度</label>
