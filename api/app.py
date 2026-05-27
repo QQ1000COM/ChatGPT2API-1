@@ -12,6 +12,12 @@ from api import accounts, ai, gallery, image_tasks, register, system
 from api.support import resolve_web_asset, start_limited_account_watcher
 from services.backup_service import backup_service
 from services.config import config
+from services.remote_data_proxy import (
+    proxy_remote_data_request,
+    remote_data_proxy_base_url,
+    remote_data_proxy_enabled,
+    should_proxy_path,
+)
 
 
 def create_app() -> FastAPI:
@@ -43,6 +49,10 @@ def create_app() -> FastAPI:
     # 会出现"改了配置/数据但 UI 不更新"的诡异现象。一律 no-store 让每次都打到后端。
     @app.middleware("http")
     async def _no_store_for_api(request: Request, call_next):
+        proxy_base_url = remote_data_proxy_base_url()
+        if remote_data_proxy_enabled() and proxy_base_url and should_proxy_path(request.url.path):
+            return await proxy_remote_data_request(request, proxy_base_url)
+
         response = await call_next(request)
         path = request.url.path
         if path.startswith("/api/") or path.startswith("/v1/"):
