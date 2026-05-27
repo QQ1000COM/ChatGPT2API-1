@@ -23,6 +23,45 @@ function hasBrowserStorage() {
   return typeof globalThis.window !== "undefined";
 }
 
+function readLocalAuthKey() {
+  if (!hasBrowserStorage()) return "";
+  try {
+    return String(globalThis.window.localStorage.getItem(AUTH_KEY_STORAGE_KEY) || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function writeLocalAuthSession(session: StoredAuthSession) {
+  if (!hasBrowserStorage()) return;
+  try {
+    globalThis.window.localStorage.setItem(AUTH_KEY_STORAGE_KEY, session.key);
+    globalThis.window.localStorage.setItem(AUTH_SESSION_STORAGE_KEY, JSON.stringify(session));
+  } catch {
+  }
+}
+
+function readLocalAuthSession() {
+  if (!hasBrowserStorage()) return null;
+  try {
+    return normalizeSession(
+      JSON.parse(globalThis.window.localStorage.getItem(AUTH_SESSION_STORAGE_KEY) || "null"),
+      readLocalAuthKey(),
+    );
+  } catch {
+    return null;
+  }
+}
+
+function clearLocalAuthSession() {
+  if (!hasBrowserStorage()) return;
+  try {
+    globalThis.window.localStorage.removeItem(AUTH_KEY_STORAGE_KEY);
+    globalThis.window.localStorage.removeItem(AUTH_SESSION_STORAGE_KEY);
+  } catch {
+  }
+}
+
 function normalizeSession(value: unknown, fallbackKey = ""): StoredAuthSession | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -51,19 +90,33 @@ export async function getStoredAuthKey() {
   if (!hasBrowserStorage()) {
     return "";
   }
-  const value = await authStorage.getItem<string>(AUTH_KEY_STORAGE_KEY);
-  return String(value || "").trim();
+  const localValue = readLocalAuthKey();
+  if (localValue) return localValue;
+  try {
+    const value = await authStorage.getItem<string>(AUTH_KEY_STORAGE_KEY);
+    return String(value || "").trim();
+  } catch {
+    return "";
+  }
 }
 
 export async function getStoredAuthSession() {
   if (!hasBrowserStorage()) {
     return null;
   }
+  const localSession = readLocalAuthSession();
+  if (localSession) return localSession;
 
-  const [storedKey, storedSession] = await Promise.all([
-    authStorage.getItem<string>(AUTH_KEY_STORAGE_KEY),
-    authStorage.getItem<StoredAuthSession>(AUTH_SESSION_STORAGE_KEY),
-  ]);
+  let storedKey = "";
+  let storedSession: StoredAuthSession | null = null;
+  try {
+    [storedKey, storedSession] = await Promise.all([
+      authStorage.getItem<string>(AUTH_KEY_STORAGE_KEY),
+      authStorage.getItem<StoredAuthSession>(AUTH_SESSION_STORAGE_KEY),
+    ]);
+  } catch {
+    return null;
+  }
 
   const normalizedSession = normalizeSession(storedSession, String(storedKey || ""));
   if (normalizedSession) {
@@ -86,10 +139,11 @@ export async function setStoredAuthSession(session: StoredAuthSession) {
     return;
   }
 
+  writeLocalAuthSession(normalizedSession);
   await Promise.all([
     authStorage.setItem(AUTH_KEY_STORAGE_KEY, normalizedSession.key),
     authStorage.setItem(AUTH_SESSION_STORAGE_KEY, normalizedSession),
-  ]);
+  ]).catch(() => {});
 }
 
 export async function setStoredAuthKey(authKey: string) {
@@ -98,17 +152,24 @@ export async function setStoredAuthKey(authKey: string) {
     await clearStoredAuthSession();
     return;
   }
-  await authStorage.setItem(AUTH_KEY_STORAGE_KEY, normalizedAuthKey);
+  if (hasBrowserStorage()) {
+    try {
+      globalThis.window.localStorage.setItem(AUTH_KEY_STORAGE_KEY, normalizedAuthKey);
+    } catch {
+    }
+  }
+  await authStorage.setItem(AUTH_KEY_STORAGE_KEY, normalizedAuthKey).catch(() => {});
 }
 
 export async function clearStoredAuthSession() {
   if (!hasBrowserStorage()) {
     return;
   }
+  clearLocalAuthSession();
   await Promise.all([
     authStorage.removeItem(AUTH_KEY_STORAGE_KEY),
     authStorage.removeItem(AUTH_SESSION_STORAGE_KEY),
-  ]);
+  ]).catch(() => {});
 }
 
 export async function clearStoredAuthKey() {
