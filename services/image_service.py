@@ -159,8 +159,12 @@ def _image_items(start_date: str = "", end_date: str = "", owner: str = "", admi
                     continue
             elif owner_id != owner_filter:
                 continue
-        dimensions = _image_dimensions(path)
         remote = remote_map.get(rel) if rel else None
+        dimensions = (
+            (int(remote.get("width")), int(remote.get("height")))
+            if remote and remote.get("width") and remote.get("height")
+            else None
+        )
         items.append({
             "rel": rel,
             "path": rel,
@@ -215,8 +219,6 @@ def list_images(
     owner: str = "",
     admin_ids: set[str] | None = None,
 ) -> dict[str, object]:
-    config.cleanup_old_images()
-    cleanup_image_thumbnails()
     all_tags = load_tags()
     owners_map = load_owners()
     prompts_map = load_prompts()
