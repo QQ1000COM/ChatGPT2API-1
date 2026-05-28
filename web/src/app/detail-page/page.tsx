@@ -359,8 +359,12 @@ function buildReplaceItems(
   productImages: UploadImage[],
   referenceImages: UploadImage[],
   size: string,
+  keepProductSubject: boolean,
 ): GeneratedItem[] {
   const base = basePrompt({ ...form, sameStyle: true });
+  const productSubjectPrompt = keepProductSubject
+    ? "保持产品主体不变：必须把产品图中的商品当作刚性主体完整迁移，不能重绘成相似款，不能改变轮廓、结构、颜色、材质、Logo/纹理位置、零件数量、按钮/接口/花纹和长宽比例；只允许根据参考图环境调整透视、大小、接触阴影、反光和环境光。"
+    : "允许在不改变商品识别度的前提下，为适配参考图场景做轻微角度、光影和摆放变化。";
   return productImages.flatMap((product, productIndex) =>
     referenceImages.map((reference, referenceIndex) => ({
       id: createId(),
@@ -372,6 +376,7 @@ function buildReplaceItems(
         "",
         "批量替换主体任务：产品图是必须保留的新商品主体，参考图是目标构图、场景、光线、机位、背景、透视、景深、阴影和整体氛围。",
         "请把参考图里的原商品、原主体或同类物体完整替换成产品图里的商品，保持参考图原有背景和画面关系自然可信。",
+        productSubjectPrompt,
         "必须严格保留我上传产品的外观、结构、颜色、材质、比例、Logo/纹理位置和关键细节，不要混入参考图原商品的形状、品牌、颜色或装饰。",
         "替换后的产品需要自然融入参考图环境：透视正确、大小合理、接触阴影真实、反光和环境光一致，遮挡关系自然。",
         "不要改变参考图的主要场景、道具、人物姿态、拍摄角度和商业氛围；不要生成海报文字、二维码、水印、虚假品牌 Logo 或无关促销元素。",
@@ -752,6 +757,7 @@ export default function DetailPageGenerator() {
   const [buyerConsistentScene, setBuyerConsistentScene] = useState(true);
   const [buyerBackgroundMode, setBuyerBackgroundMode] = useState("natural");
   const [replaceRatio, setReplaceRatio] = useState("1:1");
+  const [replaceKeepProductSubject, setReplaceKeepProductSubject] = useState(true);
   const [items, setItems] = useState<GeneratedItem[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [regeneratingItemIds, setRegeneratingItemIds] = useState<string[]>([]);
@@ -936,7 +942,7 @@ export default function DetailPageGenerator() {
                 backgroundMode: buyerBackgroundModes.find((item) => item.id === buyerBackgroundMode)?.prompt || buyerBackgroundModes[1].prompt,
               })
             : mode === "replace"
-              ? buildReplaceItems(form, productImages, referenceImages, replaceRatio)
+              ? buildReplaceItems(form, productImages, referenceImages, replaceRatio, replaceKeepProductSubject)
               : buildWhiteItems(form, "1:1");
     setItems(nextItems);
     setIsGenerating(true);
@@ -1495,6 +1501,17 @@ export default function DetailPageGenerator() {
                         className="size-4 accent-foreground"
                       />
                       场景保持一致
+                    </label>
+                  ) : null}
+                  {mode === "replace" ? (
+                    <label className="inline-flex cursor-pointer items-center gap-2 rounded-full bg-secondary px-3 py-2 text-sm text-muted-foreground">
+                      <input
+                        type="checkbox"
+                        checked={replaceKeepProductSubject}
+                        onChange={(event) => setReplaceKeepProductSubject(event.target.checked)}
+                        className="size-4 accent-foreground"
+                      />
+                      保持产品主体不变
                     </label>
                   ) : null}
                 </div>
