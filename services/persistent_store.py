@@ -3,8 +3,13 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Any
+
+_engine = None
+_engine_url = ""
+_engine_lock = threading.Lock()
 
 
 def _database_url() -> str:
@@ -28,19 +33,23 @@ def _with_connection(callback):
     try:
         from sqlalchemy import create_engine, text
 
-        engine = create_engine(database_url, pool_pre_ping=True)
-        try:
-            with engine.begin() as connection:
-                connection.execute(
-                    text(
-                        "CREATE TABLE IF NOT EXISTS app_files ("
-                        "key VARCHAR(255) PRIMARY KEY, "
-                        "data TEXT NOT NULL)"
-                    )
+        global _engine, _engine_url
+        with _engine_lock:
+            if _engine is None or _engine_url != database_url:
+                if _engine is not None:
+                    _engine.dispose()
+                _engine = create_engine(database_url, pool_pre_ping=True)
+                _engine_url = database_url
+            engine = _engine
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS app_files ("
+                    "key VARCHAR(255) PRIMARY KEY, "
+                    "data TEXT NOT NULL)"
                 )
-                return callback(connection, text)
-        finally:
-            engine.dispose()
+            )
+            return callback(connection, text)
     except Exception as exc:
         print(f"[persistent-store] database operation failed: {exc}", file=sys.stderr)
         return None
