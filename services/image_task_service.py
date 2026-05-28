@@ -13,6 +13,7 @@ from services.content_filter import request_text
 from services.image_owners_service import record_owner_for_result
 from services.image_prompts_service import record_prompt_for_result
 from services.log_service import LOG_TYPE_CALL, log_service
+from services.persistent_store import read_text, write_text
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
 from services.remote_image_index_service import find_remote_image_by_url
 
@@ -128,6 +129,7 @@ class ImageTaskService:
         self.generation_handler = generation_handler
         self.edit_handler = edit_handler
         self.retention_days_getter = retention_days_getter or (lambda: config.image_retention_days)
+        self.store_key = path.name
         self._lock = threading.RLock()
         self._tasks: dict[str, dict[str, Any]] = {}
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -465,10 +467,11 @@ class ImageTaskService:
             self._save_locked()
 
     def _load_locked(self) -> dict[str, dict[str, Any]]:
-        if not self.path.exists():
+        content = read_text(self.store_key, self.path)
+        if not content:
             return {}
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            raw = json.loads(content)
         except Exception:
             return {}
         raw_items = raw.get("tasks") if isinstance(raw, dict) else raw
@@ -508,9 +511,7 @@ class ImageTaskService:
 
     def _save_locked(self) -> None:
         items = sorted(self._tasks.values(), key=lambda item: str(item.get("updated_at") or ""), reverse=True)
-        tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps({"tasks": items}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        tmp_path.replace(self.path)
+        write_text(self.store_key, self.path, json.dumps({"tasks": items}, ensure_ascii=False, indent=2) + "\n")
 
     def _recover_unfinished_locked(self) -> bool:
         changed = False
