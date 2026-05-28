@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from services.config import DATA_DIR
+from services.persistent_store import read_json, write_json
 
 CONVERSATIONS_FILE = DATA_DIR / "image_conversations.json"
 
@@ -17,12 +18,7 @@ def _clean(value: object) -> str:
 
 
 def _read_all() -> dict[str, list[dict[str, Any]]]:
-    if not CONVERSATIONS_FILE.exists():
-        return {}
-    try:
-        data = json.loads(CONVERSATIONS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    data = read_json(CONVERSATIONS_FILE.name, CONVERSATIONS_FILE, {})
     if not isinstance(data, dict):
         return {}
     result: dict[str, list[dict[str, Any]]] = {}
@@ -35,7 +31,7 @@ def _read_all() -> dict[str, list[dict[str, Any]]]:
 
 def _write_all(data: dict[str, list[dict[str, Any]]]) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    CONVERSATIONS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json(CONVERSATIONS_FILE.name, CONVERSATIONS_FILE, data)
 
 
 def _normalize_conversation(item: dict[str, Any]) -> dict[str, Any]:

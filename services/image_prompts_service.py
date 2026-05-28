@@ -5,6 +5,7 @@ import threading
 from typing import Any
 
 from services.config import DATA_DIR
+from services.persistent_store import read_json, write_json
 
 # 图片 → 生成时的 prompt 文本。跟 image_owners.json 同套路：
 # 单独一份 JSON，运行时按 rel 路径快速反查。
@@ -21,16 +22,11 @@ _lock = threading.RLock()
 
 def _ensure_file() -> None:
     PROMPTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if not PROMPTS_FILE.exists():
-        PROMPTS_FILE.write_text("{}", encoding="utf-8")
 
 
 def load_prompts() -> dict[str, str]:
     _ensure_file()
-    try:
-        data = json.loads(PROMPTS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    data = read_json(PROMPTS_FILE.name, PROMPTS_FILE, {})
     if not isinstance(data, dict):
         return {}
     return {str(k): str(v) for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
@@ -38,9 +34,7 @@ def load_prompts() -> dict[str, str]:
 
 def _save_locked(data: dict[str, str]) -> None:
     _ensure_file()
-    tmp = PROMPTS_FILE.with_suffix(PROMPTS_FILE.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(PROMPTS_FILE)
+    write_json(PROMPTS_FILE.name, PROMPTS_FILE, data)
 
 
 def set_prompts(rels: list[str], prompt: str) -> None:

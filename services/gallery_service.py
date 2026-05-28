@@ -8,6 +8,7 @@ from typing import Any
 from services.config import config
 from services.content_filter import check_request
 from services.image_edits_service import is_edit as _rel_is_edit
+from services.remote_image_index_service import find_remote_image_by_rel
 
 # 画廊条目存储 schema（每条都是 dict 落进 storage.gallery_items）
 #
@@ -84,7 +85,9 @@ def _public_view(
     无需把 publisher_id 本身泄露出去。
     """
     rel = item.get("image_rel") or ""
-    url = f"{image_base_url.rstrip('/')}/images/{rel}" if rel else ""
+    remote = find_remote_image_by_rel(rel) if rel else None
+    remote_url = str((remote or {}).get("url") or (remote or {}).get("thumbnail_url") or "").strip()
+    url = remote_url or (f"{image_base_url.rstrip('/')}/images/{rel}" if rel else "")
     pid = (item.get("publisher_id") or "").strip()
     vid = (viewer_id or "").strip()
     return {

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 
 def _database_url() -> str:
@@ -95,3 +97,17 @@ def append_line(key: str, path: Path, line: str) -> None:
 
     if _enabled():
         _with_connection(_append)
+
+
+def read_json(key: str, path: Path, default: Any) -> Any:
+    content = read_text(key, path)
+    if not content:
+        return default
+    try:
+        return json.loads(content)
+    except Exception:
+        return default
+
+
+def write_json(key: str, path: Path, value: Any) -> None:
+    write_text(key, path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")

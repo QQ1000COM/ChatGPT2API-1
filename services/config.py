@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timezone
 
 from services.storage.base import StorageBackend
+from services.persistent_store import read_json, write_json
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
@@ -703,12 +704,13 @@ class ConfigStore:
 
 
 def load_backup_state() -> dict[str, object]:
-    return _normalize_backup_state(_read_json_object(BACKUP_STATE_FILE, name="backup_state.json"))
+    data = read_json(BACKUP_STATE_FILE.name, BACKUP_STATE_FILE, {})
+    return _normalize_backup_state(data if isinstance(data, dict) else {})
 
 
 def save_backup_state(state: dict[str, object]) -> dict[str, object]:
     normalized = _normalize_backup_state(state)
-    BACKUP_STATE_FILE.write_text(json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json(BACKUP_STATE_FILE.name, BACKUP_STATE_FILE, normalized)
     return normalized
 
 

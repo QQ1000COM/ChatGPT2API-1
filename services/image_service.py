@@ -116,9 +116,13 @@ def count_total_images() -> int:
     """图片管理页"未归属"数量统计用：纯粹数 images_dir 下文件数。
     比 _image_items 轻量，避开了打开文件取尺寸的 IO。"""
     root = config.images_dir
-    if not root.exists():
-        return 0
-    return sum(1 for path in root.rglob("*") if path.is_file())
+    local_rels = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()} if root.exists() else set()
+    remote_rels = {
+        str(remote.get("rel") or remote.get("path") or "").strip().lstrip("/")
+        for remote in list_remote_images()
+    }
+    remote_rels.discard("")
+    return len(local_rels | remote_rels)
 
 
 def _image_items(start_date: str = "", end_date: str = "", owner: str = "", admin_ids: set[str] | None = None) -> list[dict[str, object]]:
@@ -127,6 +131,11 @@ def _image_items(start_date: str = "", end_date: str = "", owner: str = "", admi
     owner_filter = (owner or "").strip()
     owners_map = load_owners() if owner_filter else {}
     admin_set = admin_ids or set()
+    remote_map = {
+        str(remote.get("rel") or remote.get("path") or "").strip().lstrip("/"): remote
+        for remote in list_remote_images()
+    }
+    remote_map.pop("", None)
     for path in root.rglob("*"):
         if not path.is_file():
             continue
@@ -151,6 +160,7 @@ def _image_items(start_date: str = "", end_date: str = "", owner: str = "", admi
             elif owner_id != owner_filter:
                 continue
         dimensions = _image_dimensions(path)
+        remote = remote_map.get(rel) if rel else None
         items.append({
             "rel": rel,
             "path": rel,
@@ -158,11 +168,13 @@ def _image_items(start_date: str = "", end_date: str = "", owner: str = "", admi
             "date": day,
             "size": path.stat().st_size,
             "created_at": datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            **({"url": str(remote.get("url") or "")} if remote and remote.get("url") else {}),
+            **({"thumbnail_url": str(remote.get("thumbnail_url") or remote.get("url") or "")} if remote and (remote.get("thumbnail_url") or remote.get("url")) else {}),
             **({"width": dimensions[0], "height": dimensions[1]} if dimensions else {}),
         })
     items.sort(key=lambda item: str(item["created_at"]), reverse=True)
     local_rels = {str(item.get("path") or "") for item in items}
-    for remote in list_remote_images():
+    for remote in remote_map.values():
         rel = str(remote.get("rel") or remote.get("path") or "").strip().lstrip("/")
         if not rel or rel in local_rels:
             continue

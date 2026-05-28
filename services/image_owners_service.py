@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from services.config import DATA_DIR
+from services.persistent_store import read_json, write_json
 
 # 图片 → 创建者用户密钥 ID 的归属表。
 # 之所以独立放一份 JSON、不和 image_tags 合并：
@@ -19,16 +20,11 @@ _lock = threading.RLock()
 
 def _ensure_file() -> None:
     OWNERS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if not OWNERS_FILE.exists():
-        OWNERS_FILE.write_text("{}", encoding="utf-8")
 
 
 def load_owners() -> dict[str, str]:
     _ensure_file()
-    try:
-        data = json.loads(OWNERS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    data = read_json(OWNERS_FILE.name, OWNERS_FILE, {})
     if not isinstance(data, dict):
         return {}
     # 防御：只保留 str → str 形态
@@ -37,9 +33,7 @@ def load_owners() -> dict[str, str]:
 
 def _save_locked(data: dict[str, str]) -> None:
     _ensure_file()
-    tmp = OWNERS_FILE.with_suffix(OWNERS_FILE.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(OWNERS_FILE)
+    write_json(OWNERS_FILE.name, OWNERS_FILE, data)
 
 
 def set_owner(image_rel: str, owner_id: str) -> None:

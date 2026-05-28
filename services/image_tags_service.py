@@ -4,28 +4,24 @@ import json
 from pathlib import Path
 
 from services.config import DATA_DIR
+from services.persistent_store import read_json, write_json
 
 TAGS_FILE = DATA_DIR / "image_tags.json"
 
 
 def _ensure_file() -> None:
     TAGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if not TAGS_FILE.exists():
-        TAGS_FILE.write_text("{}", encoding="utf-8")
 
 
 def load_tags() -> dict[str, list[str]]:
     _ensure_file()
-    try:
-        data = json.loads(TAGS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    data = read_json(TAGS_FILE.name, TAGS_FILE, {})
     return data if isinstance(data, dict) else {}
 
 
 def save_tags(data: dict[str, list[str]]) -> None:
     _ensure_file()
-    TAGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json(TAGS_FILE.name, TAGS_FILE, data)
 
 
 def get_tags(image_rel: str) -> list[str]:

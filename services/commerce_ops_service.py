@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from services.config import DATA_DIR
+from services.persistent_store import read_json, write_json
+from services.remote_image_index_service import find_remote_image_by_rel
 
 OPS_FILE = DATA_DIR / "commerce_ops.json"
 _lock = threading.RLock()
@@ -22,18 +24,12 @@ def _clean(value: object) -> str:
 
 
 def _read() -> dict[str, Any]:
-    if not OPS_FILE.exists():
-        return {}
-    try:
-        data = json.loads(OPS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    data = read_json(OPS_FILE.name, OPS_FILE, {})
     return data if isinstance(data, dict) else {}
 
 
 def _write(data: dict[str, Any]) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    OPS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json(OPS_FILE.name, OPS_FILE, data)
 
 
 def _items(key: str) -> list[dict[str, Any]]:
@@ -117,11 +113,13 @@ def list_home_cases(*, include_hidden: bool = False) -> list[dict[str, Any]]:
         hidden = bool(item.get("hidden"))
         if hidden and not include_hidden:
             continue
+        image_rel = _clean(item.get("image_rel"))
+        remote = find_remote_image_by_rel(image_rel) if image_rel else None
         normalized.append({
             "id": _clean(item.get("id")),
             "title": _clean(item.get("title")),
-            "image_url": _clean(item.get("image_url")),
-            "image_rel": _clean(item.get("image_rel")),
+            "image_url": _clean((remote or {}).get("url")) or _clean((remote or {}).get("thumbnail_url")) or _clean(item.get("image_url")),
+            "image_rel": image_rel,
             "category": _clean(item.get("category")) or "默认",
             "hidden": hidden,
             "sort": int(item.get("sort") or 0),
@@ -135,11 +133,13 @@ def list_home_cases(*, include_hidden: bool = False) -> list[dict[str, Any]]:
 def save_home_case(payload: dict[str, Any]) -> dict[str, Any]:
     now = _now()
     item_id = _clean(payload.get("id")) or uuid.uuid4().hex
+    image_rel = _clean(payload.get("image_rel"))
+    remote = find_remote_image_by_rel(image_rel) if image_rel else None
     item = {
         "id": item_id,
         "title": _clean(payload.get("title")) or "真实案例",
-        "image_url": _clean(payload.get("image_url")),
-        "image_rel": _clean(payload.get("image_rel")),
+        "image_url": _clean((remote or {}).get("url")) or _clean((remote or {}).get("thumbnail_url")) or _clean(payload.get("image_url")),
+        "image_rel": image_rel,
         "category": _clean(payload.get("category")) or "默认",
         "hidden": bool(payload.get("hidden")),
         "sort": int(payload.get("sort") or 0),
@@ -229,11 +229,13 @@ def feedback_stats() -> dict[str, Any]:
 def create_share(owner_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     now = _now()
     token = uuid.uuid4().hex
+    image_rel = _clean(payload.get("image_rel"))
+    remote = find_remote_image_by_rel(image_rel) if image_rel else None
     item = {
         "token": token,
         "owner_id": _clean(owner_id) or "anonymous",
-        "image_rel": _clean(payload.get("image_rel")),
-        "image_url": _clean(payload.get("image_url")),
+        "image_rel": image_rel,
+        "image_url": _clean((remote or {}).get("url")) or _clean((remote or {}).get("thumbnail_url")) or _clean(payload.get("image_url")),
         "title": _clean(payload.get("title")) or "图片分享",
         "prompt": _clean(payload.get("prompt")),
         "created_at": now,
@@ -252,7 +254,13 @@ def get_share(token: str) -> dict[str, Any] | None:
     with _lock:
         for item in _items("shares"):
             if _clean(item.get("token")) == target:
-                return item
+                result = dict(item)
+                image_rel = _clean(result.get("image_rel"))
+                remote = find_remote_image_by_rel(image_rel) if image_rel else None
+                remote_url = _clean((remote or {}).get("url")) or _clean((remote or {}).get("thumbnail_url"))
+                if remote_url:
+                    result["image_url"] = remote_url
+                return result
     return None
 
 

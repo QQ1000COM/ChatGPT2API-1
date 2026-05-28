@@ -4,6 +4,7 @@ import json
 import threading
 
 from services.config import DATA_DIR
+from services.persistent_store import read_json, write_json
 
 # 标记一组 rel 是不是「图生图（image edits）」产出。
 # 单独存 set：图生图的 prompt 是相对参考图的修改指令（"换个浅色版"、"加个帽子"），
@@ -21,16 +22,11 @@ _lock = threading.RLock()
 
 def _ensure_file() -> None:
     EDITS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if not EDITS_FILE.exists():
-        EDITS_FILE.write_text('{"rels": []}\n', encoding="utf-8")
 
 
 def _load_set() -> set[str]:
     _ensure_file()
-    try:
-        data = json.loads(EDITS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return set()
+    data = read_json(EDITS_FILE.name, EDITS_FILE, {})
     rels = data.get("rels") if isinstance(data, dict) else None
     if not isinstance(rels, list):
         return set()
@@ -39,10 +35,8 @@ def _load_set() -> set[str]:
 
 def _save_locked(s: set[str]) -> None:
     _ensure_file()
-    tmp = EDITS_FILE.with_suffix(EDITS_FILE.suffix + ".tmp")
     payload = {"rels": sorted(s)}
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(EDITS_FILE)
+    write_json(EDITS_FILE.name, EDITS_FILE, payload)
 
 
 def mark_edits(rels: list[str]) -> None:
