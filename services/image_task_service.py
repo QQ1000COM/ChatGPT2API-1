@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -114,6 +115,53 @@ def _public_task_data(data: Any) -> Any:
                     next_entry["local_url"] = f"/images/{rel}"
         result.append(next_entry)
     return result
+
+
+def _result_rel(entry: Any) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    local_url = str(entry.get("local_url") or "").strip()
+    if "/images/" in local_url:
+        return local_url[local_url.find("/images/") + len("/images/") :].strip().lstrip("/")
+    url = str(entry.get("url") or "").strip()
+    if "/images/" in url:
+        return url[url.find("/images/") + len("/images/") :].strip().lstrip("/")
+    remote = find_remote_image_by_url(url)
+    return str((remote or {}).get("rel") or (remote or {}).get("path") or "").strip().lstrip("/")
+
+
+def _infer_tool_name(prompt: str, mode: str) -> str:
+    text = prompt or ""
+    checks = [
+        ("批量替换主体", ("替换主体", "主体替换")),
+        ("AI详情页", ("详情页", "长图")),
+        ("买家秀", ("买家秀", "晒单", "种草")),
+        ("爆款主图", ("爆款主图", "主图")),
+        ("白底图", ("白底图",)),
+    ]
+    for label, keywords in checks:
+        if any(keyword in text for keyword in keywords):
+            return label
+    return "图生图" if mode == "edit" else "AI生图"
+
+
+def _infer_product_name(prompt: str) -> str:
+    text = prompt or ""
+    patterns = [
+        r"(?:商品名|商品名称|产品名|产品名称)\s*[:：]\s*([^\r\n，,。；;]+)",
+        r"(?:为|给)\s*([^\r\n，,。；;]{2,36})\s*(?:生成|制作|设计)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            value = match.group(1).strip()
+            if value:
+                return value[:36]
+    for line in text.splitlines():
+        value = line.strip(" ：:，,。；;")
+        if 2 <= len(value) <= 36 and not any(key in value for key in ("生成", "必须", "不要", "上传", "参考图")):
+            return value
+    return "未命名商品"
 
 
 class ImageTaskService:
@@ -513,6 +561,43 @@ class ImageTaskService:
         items = sorted(self._tasks.values(), key=lambda item: str(item.get("updated_at") or ""), reverse=True)
         write_text(self.store_key, self.path, json.dumps({"tasks": items}, ensure_ascii=False, indent=2) + "\n")
 
+    def image_group_index(self) -> dict[str, dict[str, Any]]:
+        with self._lock:
+            tasks = [dict(task) for task in self._tasks.values()]
+        index: dict[str, dict[str, Any]] = {}
+        for task in tasks:
+            if task.get("status") != TASK_STATUS_SUCCESS:
+                continue
+            data = _public_task_data(task.get("data"))
+            if not isinstance(data, list) or len(data) <= 1:
+                continue
+            rels: list[str] = []
+            seen: set[str] = set()
+            for entry in data:
+                rel = _result_rel(entry)
+                if not rel or rel in seen:
+                    continue
+                seen.add(rel)
+                rels.append(rel)
+            if len(rels) <= 1:
+                continue
+            prompt = _clean(task.get("prompt"))
+            tool_name = _infer_tool_name(prompt, _clean(task.get("mode")))
+            product_name = _infer_product_name(prompt)
+            group_id = _clean(task.get("id")) or "|".join(rels)
+            title = f"{tool_name} {product_name}".strip()
+            for idx, rel in enumerate(rels):
+                index[rel] = {
+                    "group_id": group_id,
+                    "group_title": title,
+                    "group_count": len(rels),
+                    "group_index": idx,
+                    "group_rels": rels,
+                    "tool_name": tool_name,
+                    "product_name": product_name,
+                }
+        return index
+
     def _recover_unfinished_locked(self) -> bool:
         changed = False
         for task in self._tasks.values():
@@ -540,3 +625,7 @@ class ImageTaskService:
 
 
 image_task_service = ImageTaskService(DATA_DIR / "image_tasks.json")
+
+
+def get_image_task_group_index() -> dict[str, dict[str, Any]]:
+    return image_task_service.image_group_index()

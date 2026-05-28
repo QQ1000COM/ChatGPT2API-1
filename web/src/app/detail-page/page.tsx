@@ -13,7 +13,7 @@ import {
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { createImageEditTask, fetchImageTasks, type ImageTask } from "@/lib/api";
+import { createImageEditTask, downloadImages, fetchImageTasks, type ImageTask } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 
@@ -128,6 +128,18 @@ function imageSource(item: GeneratedItem) {
     return `data:image/png;base64,${item.b64Json}`;
   }
   return item.imageUrl || "";
+}
+
+function imageRelFromItem(item: GeneratedItem) {
+  const candidates = [item.localImageUrl, item.imageUrl].filter(Boolean) as string[];
+  for (const value of candidates) {
+    const marker = "/images/";
+    const index = value.indexOf(marker);
+    if (index >= 0) {
+      return value.slice(index + marker.length).replace(/^\/+/, "");
+    }
+  }
+  return "";
 }
 
 function aspectClass(size: string) {
@@ -1034,6 +1046,41 @@ export default function DetailPageGenerator() {
     }
   };
 
+  const handleDownloadZipSmart = async () => {
+    const zipName =
+      mode === "detail"
+        ? "详情页分页图"
+        : mode === "main"
+          ? "爆款主图"
+          : mode === "buyer"
+            ? "买家秀"
+            : mode === "white"
+              ? "白底图"
+              : mode === "replace"
+                ? "批量替换主体"
+                : "尺寸转换图";
+    const filename = `${safeFileName(`${productName.trim() || zipName}-${zipName}`)}.zip`;
+    const rels = items
+      .filter((item) => item.status === "success")
+      .map(imageRelFromItem)
+      .filter(Boolean);
+    try {
+      if (rels.length > 0) {
+        try {
+          await downloadImages(rels, filename);
+          toast.success("已一键压缩下载");
+          return;
+        } catch {
+          // 旧任务或跨域图片取不到服务器路径时，继续用浏览器端兜底打包。
+        }
+      }
+      await downloadItemsZip(items, `${productName.trim() || zipName}-${zipName}`);
+      toast.success("已一键压缩下载");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "压缩下载失败");
+    }
+  };
+
   const handleRegenerateItem = async (item: GeneratedItem) => {
     if (item.status === "queued" || item.status === "running" || regeneratingItemIds.includes(item.id)) {
       return;
@@ -1580,7 +1627,7 @@ export default function DetailPageGenerator() {
                   type="button"
                   variant="outline"
                   className="rounded-full border-border bg-background text-foreground hover:bg-secondary"
-                  onClick={() => void handleDownloadZip()}
+                  onClick={() => void handleDownloadZipSmart()}
                   disabled={!canDownloadZip}
                 >
                   <Download className="size-4" />

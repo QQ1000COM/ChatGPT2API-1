@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import urllib.request
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +14,7 @@ from services.config import config
 from services.image_owners_service import load_owners, remove_owners
 from services.image_prompts_service import load_prompts, remove_prompts
 from services.image_tags_service import load_tags, remove_tags
+from services.image_task_service import get_image_task_group_index
 from services.remote_image_index_service import list_remote_images, remove_remote_images
 
 THUMBNAIL_SIZE = (320, 320)
@@ -222,11 +224,13 @@ def list_images(
     all_tags = load_tags()
     owners_map = load_owners()
     prompts_map = load_prompts()
+    group_map = get_image_task_group_index()
     admin_set = admin_ids or set()
     items = []
     for item in _image_items(start_date, end_date, owner, admin_set):
         rel = str(item["path"])
         owner_id = owners_map.get(rel, "")
+        group_info = group_map.get(rel, {})
         items.append({
             **item,
             "url": str(item.get("url") or "") or f"{base_url.rstrip('/')}/images/{rel}",
@@ -238,6 +242,7 @@ def list_images(
             # 生成时记下来的 prompt 原文。老数据没记录就空字符串。
             # web "我的作品"页据此一键复用 / 发布画廊；为空时让前端弹窗手填。
             "prompt": prompts_map.get(rel, ""),
+            **group_info,
         })
     groups: dict[str, list[dict[str, object]]] = {}
     for item in items:
@@ -289,6 +294,11 @@ def delete_images(
 
 def download_images_zip(paths: list[str]) -> io.BytesIO:
     root = config.images_dir.resolve()
+    remote_map = {
+        str(remote.get("rel") or remote.get("path") or "").strip().lstrip("/"): remote
+        for remote in list_remote_images()
+    }
+    remote_map.pop("", None)
     buf = io.BytesIO()
     added = 0
     used_names: set[str] = set()
@@ -300,7 +310,18 @@ def download_images_zip(paths: list[str]) -> io.BytesIO:
                 path.relative_to(root)
             except ValueError:
                 continue
-            if not path.is_file():
+            payload: bytes | None = None
+            if path.is_file():
+                payload = path.read_bytes()
+            else:
+                remote_url = str((remote_map.get(rel) or {}).get("url") or "").strip()
+                if remote_url:
+                    try:
+                        with urllib.request.urlopen(remote_url, timeout=30) as response:
+                            payload = response.read()
+                    except Exception:
+                        payload = None
+            if not payload:
                 continue
             name = path.name
             if name in used_names:
@@ -311,7 +332,7 @@ def download_images_zip(paths: list[str]) -> io.BytesIO:
                     counter += 1
                 name = f"{stem}_{counter}{suffix}"
             used_names.add(name)
-            zf.write(path, name)
+            zf.writestr(name, payload)
             added += 1
     if added == 0:
         raise HTTPException(status_code=404, detail="no images found")

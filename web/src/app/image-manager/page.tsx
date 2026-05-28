@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, ImageIcon, LoaderCircle, Maximize2, Plus, RefreshCw, Search, Share2, Tag, Trash2, User, X } from "lucide-react";
+import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, Folder, ImageIcon, LoaderCircle, Maximize2, Plus, RefreshCw, Search, Share2, Tag, Trash2, User, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
@@ -24,6 +24,47 @@ function formatSize(size: number) {
 
 function imageKey(item: ManagedImage) {
   return item.rel || item.url;
+}
+
+type ManagedEntry =
+  | { type: "image"; id: string; item: ManagedImage }
+  | { type: "folder"; id: string; title: string; count: number; items: ManagedImage[] };
+
+function groupManagedImages(items: ManagedImage[]): ManagedEntry[] {
+  const groups = new Map<string, ManagedImage[]>();
+  const order: string[] = [];
+  for (const item of items) {
+    const key = item.group_id && (item.group_count || 0) > 1 ? item.group_id : "";
+    if (!key) {
+      order.push(`image:${imageKey(item)}`);
+      continue;
+    }
+    if (!groups.has(key)) {
+      groups.set(key, []);
+      order.push(`group:${key}`);
+    }
+    groups.get(key)?.push(item);
+  }
+  return order.map((key) => {
+    if (key.startsWith("group:")) {
+      const id = key.slice("group:".length);
+      const grouped = (groups.get(id) || []).sort((a, b) => (a.group_index ?? 0) - (b.group_index ?? 0));
+      return {
+        type: "folder",
+        id,
+        title: grouped[0]?.group_title || "成套图片",
+        count: grouped[0]?.group_count || grouped.length,
+        items: grouped,
+      };
+    }
+    const id = key.slice("image:".length);
+    const item = items.find((row) => imageKey(row) === id) || items[0];
+    return { type: "image", id, item };
+  });
+}
+
+function entryPaths(entry: ManagedEntry): string[] {
+  return entry.type === "folder" ? entry.items.map(imageKey) : [imageKey(entry.item)];
 }
 
 // 用户筛选下拉。max-h 限定 320px，列表本身用 .scrollbar-fancy 走自定义细滚动条，
@@ -348,6 +389,7 @@ function ImageManagerContent() {
   const filteredItems = selectedTags.length > 0
     ? items.filter((item) => selectedTags.every((t) => (item.tags ?? []).includes(t)))
     : items;
+  const displayEntries = useMemo(() => groupManagedImages(filteredItems), [filteredItems]);
 
   const lightboxImages = filteredItems.map((item) => ({
     id: item.name,
@@ -356,9 +398,9 @@ function ImageManagerContent() {
     dimensions: item.width && item.height ? `${item.width} x ${item.height}` : undefined,
   }));
   const pageSize = 12;
-  const pageCount = Math.max(1, Math.ceil(filteredItems.length / pageSize));
+  const pageCount = Math.max(1, Math.ceil(displayEntries.length / pageSize));
   const safePage = Math.min(page, pageCount);
-  const currentRows = filteredItems.slice((safePage - 1) * pageSize, safePage * pageSize);
+  const currentRows = displayEntries.slice((safePage - 1) * pageSize, safePage * pageSize);
   const selectedSet = useMemo(() => new Set(selectedPaths), [selectedPaths]);
   const ownerNameById = useMemo(() => {
     const map = new Map<string, string>();
@@ -371,7 +413,7 @@ function ImageManagerContent() {
     return map;
   }, [owners]);
   const selectedCount = deleteMode === "filtered" ? items.length : selectedPaths.length;
-  const currentPageSelected = currentRows.length > 0 && currentRows.every((item) => selectedSet.has(imageKey(item)));
+  const currentPageSelected = currentRows.length > 0 && currentRows.every((entry) => entryPaths(entry).every((path) => selectedSet.has(path)));
   const allSelected = filteredItems.length > 0 && filteredItems.every((item) => selectedSet.has(imageKey(item)));
 
   const loadImages = async (silent = false) => {
@@ -730,7 +772,7 @@ function ImageManagerContent() {
               共 {filteredItems.length} 张
               {selectedTags.length > 0 ? <span className="text-stone-400">（筛选自 {items.length} 张）</span> : null}
               <label className="flex items-center gap-2">
-                <Checkbox checked={currentPageSelected} onCheckedChange={(checked) => togglePaths(currentRows.map(imageKey), Boolean(checked))} />
+                <Checkbox checked={currentPageSelected} onCheckedChange={(checked) => togglePaths(currentRows.flatMap(entryPaths), Boolean(checked))} />
                 本页全选
               </label>
               <label className="flex items-center gap-2">
@@ -758,7 +800,59 @@ function ImageManagerContent() {
             </div>
           </div>
           <div className="grid gap-0 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
-            {currentRows.map((item) => {
+            {currentRows.map((entry) => {
+              if (entry.type === "folder") {
+                const paths = entryPaths(entry);
+                const folderSelected = paths.every((path) => selectedSet.has(path));
+                const firstIndex = filteredItems.findIndex((row) => row.url === entry.items[0]?.url);
+                return (
+                  <div key={entry.id} className="group border-r border-b border-stone-100 p-4 transition hover:bg-stone-50">
+                    <button
+                      type="button"
+                      className="relative block aspect-square w-full cursor-zoom-in overflow-hidden rounded-lg bg-white p-2 text-left"
+                      onClick={() => {
+                        setLightboxIndex(Math.max(0, firstIndex));
+                        setLightboxOpen(true);
+                      }}
+                    >
+                      <div className="grid h-full grid-cols-2 gap-1 rounded-lg bg-stone-100 p-1">
+                        {entry.items.slice(0, 4).map((image) => (
+                          <div key={image.rel} className="overflow-hidden rounded-md bg-stone-200">
+                            <img
+                              src={image.thumbnail_url || image.url}
+                              alt={image.name}
+                              loading="lazy"
+                              decoding="async"
+                              fetchPriority="low"
+                              className="h-full w-full object-cover transition group-hover:scale-[1.02]"
+                              onError={(event) => {
+                                if (event.currentTarget.src !== image.url) {
+                                  event.currentTarget.src = image.url;
+                                }
+                              }}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                      <span className="absolute top-3 left-3 inline-flex items-center gap-1 rounded-md bg-black/60 px-2 py-1 text-[10.5px] font-semibold text-white">
+                        <Folder className="size-3.5" />
+                        {entry.count} 张
+                      </span>
+                    </button>
+                    <div className="mt-3 space-y-2 text-xs text-stone-500">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0 truncate font-medium text-stone-700">{entry.title}</div>
+                        <Checkbox checked={folderSelected} onCheckedChange={(checked) => togglePaths(paths, Boolean(checked))} />
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span>收纳盒</span>
+                        <span>{entry.items[0]?.created_at || "-"}</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              }
+              const item = entry.item;
               const imageIndex = filteredItems.findIndex((row) => row.url === item.url);
               const publishState = publishStates.get(item.rel);
               const publishedBy = publisherNames.get(item.rel);

@@ -5,6 +5,7 @@ import {
   Copy,
   ExternalLink,
   EyeOff,
+  Folder,
   Image as ImageIcon,
   LoaderCircle,
   RefreshCw,
@@ -40,6 +41,51 @@ const PAGE_LIMIT = 24;
 // 与 /works 页保持一致的 sessionStorage key，/image 页 mount 时统一消费
 const REDRAW_HANDOFF_KEY = "chatgpt2api:redraw_handoff";
 
+type GalleryEntry =
+  | { type: "image"; id: string; item: GalleryItem; width: number; height: number }
+  | { type: "folder"; id: string; title: string; count: number; items: GalleryItem[]; width: number; height: number };
+
+function groupGalleryItems(items: GalleryItem[]): GalleryEntry[] {
+  const groups = new Map<string, GalleryItem[]>();
+  const order: string[] = [];
+  for (const item of items) {
+    const key = item.group_id && (item.group_count || 0) > 1 ? item.group_id : "";
+    if (!key) {
+      order.push(`image:${item.id}`);
+      continue;
+    }
+    if (!groups.has(key)) {
+      groups.set(key, []);
+      order.push(`group:${key}`);
+    }
+    groups.get(key)?.push(item);
+  }
+  return order.map((key) => {
+    if (key.startsWith("group:")) {
+      const id = key.slice("group:".length);
+      const grouped = (groups.get(id) || []).sort((a, b) => (a.group_index ?? 0) - (b.group_index ?? 0));
+      return {
+        type: "folder",
+        id,
+        title: grouped[0]?.group_title || "成套图片",
+        count: grouped[0]?.group_count || grouped.length,
+        items: grouped,
+        width: 1,
+        height: 1,
+      };
+    }
+    const id = key.slice("image:".length);
+    const item = items.find((row) => row.id === id) || items[0];
+    return {
+      type: "image",
+      id,
+      item,
+      width: item?.width || 1,
+      height: item?.height || 1,
+    };
+  });
+}
+
 /**
  * 响应式断点：[最小宽度 px, 该宽度下的列数]，从大到小排，先匹配先用。
  * 抄 Pinterest 的密度档：mobile 2 列起步，4K 屏 6 列。
@@ -67,8 +113,8 @@ function pickColCount(width: number): number {
  *
  * 没有 width/height 的旧条目按 1:1 兜底，不影响整体平衡。
  */
-function distributeMasonry(items: GalleryItem[], cols: number): GalleryItem[][] {
-  const buckets: GalleryItem[][] = Array.from({ length: cols }, () => []);
+function distributeMasonry(items: GalleryEntry[], cols: number): GalleryEntry[][] {
+  const buckets: GalleryEntry[][] = Array.from({ length: cols }, () => []);
   const heights: number[] = Array(cols).fill(0);
   for (const item of items) {
     const ratio =
@@ -106,6 +152,7 @@ function GalleryPageContent({ isAdmin }: { isAdmin: boolean }) {
   const [includeHidden, setIncludeHidden] = useState(false);
   // 详情 dialog 焦点
   const [focused, setFocused] = useState<GalleryItem | null>(null);
+  const [focusedFolder, setFocusedFolder] = useState<GalleryEntry & { type: "folder" } | null>(null);
   // 二次确认删除（hard unpublish）
   const [pendingDelete, setPendingDelete] = useState<GalleryItem | null>(null);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
@@ -279,6 +326,7 @@ function GalleryPageContent({ isAdmin }: { isAdmin: boolean }) {
     () => items.filter((it) => it.status === "visible").length,
     [items],
   );
+  const displayEntries = useMemo(() => groupGalleryItems(items), [items]);
 
   // 关闭弹窗时，focused 立刻置 null 会让 {focused ? ... : null} 内容瞬间从 DOM 消失，
   // 剩下空的 DialogContent 在 Radix 淡出动画里收缩成"屏幕中间一条白线"。
@@ -361,9 +409,43 @@ function GalleryPageContent({ isAdmin }: { isAdmin: boolean }) {
           俩条目时直接塞到第一列，不是 bug 是规范——所以瀑布流必须自己分。
           每列内部用 flex-col 顺序堆，列间 gap-3 在 wrapper 上控。 */}
       <div className="mt-6 flex gap-3">
-        {distributeMasonry(items, colCount).map((bucket, colIdx) => (
+        {distributeMasonry(displayEntries, colCount).map((bucket, colIdx) => (
           <div key={colIdx} className="flex flex-1 flex-col gap-3">
-            {bucket.map((item) => {
+            {bucket.map((entry) => {
+              if (entry.type === "folder") {
+                return (
+                  <button
+                    key={entry.id}
+                    type="button"
+                    onClick={() => setFocusedFolder(entry)}
+                    className="group relative w-full cursor-pointer overflow-hidden rounded-2xl border border-stone-200/80 bg-white p-2 text-left shadow-sm transition hover:shadow-md"
+                    style={{ aspectRatio: "1" }}
+                  >
+                    <div className="grid h-full grid-cols-2 gap-1 rounded-xl bg-stone-100 p-1">
+                      {entry.items.slice(0, 4).map((image) => (
+                        <div key={image.id} className="overflow-hidden rounded-lg bg-stone-200">
+                          <img
+                            src={image.url}
+                            alt={image.prompt.slice(0, 30) || "作品"}
+                            loading="lazy"
+                            decoding="async"
+                            fetchPriority="low"
+                            className="h-full w-full object-cover transition group-hover:scale-[1.02]"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                    <div className="absolute right-3 bottom-3 left-3 rounded-xl bg-black/60 px-2 py-1 text-white backdrop-blur-sm">
+                      <div className="flex items-center gap-1 text-[11px] font-semibold">
+                        <Folder className="size-3.5 shrink-0" />
+                        <span className="truncate">{entry.title}</span>
+                      </div>
+                      <div className="mt-0.5 text-[10px] text-white/75">收纳盒 · {entry.count} 张</div>
+                    </div>
+                  </button>
+                );
+              }
+              const item = entry.item;
               const ratio =
                 item.width > 0 && item.height > 0
                   ? item.width / item.height
@@ -429,6 +511,38 @@ function GalleryPageContent({ isAdmin }: { isAdmin: boolean }) {
       </div>
 
       {/* 详情 Dialog */}
+      <Dialog open={focusedFolder !== null} onOpenChange={(open) => (!open ? setFocusedFolder(null) : null)}>
+        <DialogContent showCloseButton className="max-h-[88vh] overflow-y-auto rounded-2xl sm:max-w-[760px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <Folder className="size-4" />
+              {focusedFolder?.title || "收纳盒"}
+            </DialogTitle>
+            <DialogDescription>{focusedFolder?.count || focusedFolder?.items.length || 0} 张同一任务生成图片</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
+            {(focusedFolder?.items || []).map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className="overflow-hidden rounded-xl border border-stone-200 bg-stone-100 text-left"
+                onClick={() => {
+                  setFocusedFolder(null);
+                  setFocused(item);
+                }}
+              >
+                <div className="aspect-square">
+                  <img src={item.url} alt={item.prompt.slice(0, 30) || "作品"} loading="lazy" decoding="async" className="h-full w-full object-cover" />
+                </div>
+                <div className="truncate px-2 py-1.5 text-[11px] text-stone-500">
+                  第 {(item.group_index ?? 0) + 1} 张 · {formatRelativeTime(item.created_at)}
+                </div>
+              </button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={focused !== null} onOpenChange={(open) => (!open ? setFocused(null) : null)}>
         <DialogContent
           showCloseButton={false}

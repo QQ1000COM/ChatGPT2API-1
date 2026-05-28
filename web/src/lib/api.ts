@@ -195,6 +195,13 @@ export type ManagedImage = {
   // 生成时记下来的 prompt 原文（image_prompts.json）。老数据为空字符串。
   // 给"我的作品"页一键复用 / 发布画廊用；为空时前端弹窗手填。
   prompt?: string;
+  group_id?: string;
+  group_title?: string;
+  group_count?: number;
+  group_index?: number;
+  group_rels?: string[];
+  tool_name?: string;
+  product_name?: string;
 };
 
 export type ImageOwner = {
@@ -701,13 +708,13 @@ export async function deleteManagedImages(body: { paths?: string[]; start_date?:
   return httpRequest<{ removed: number }>("/api/images/delete", { method: "POST", body });
 }
 
-export async function downloadImages(paths: string[]) {
+export async function downloadImages(paths: string[], filename = "images.zip") {
   const response = await request.post("/api/images/download", { paths }, { responseType: "blob" });
   const blob = response.data as Blob;
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = "images.zip";
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -1049,6 +1056,13 @@ export type GalleryItem = {
    * 后端只在 viewer_id 非空且与 publisher_id 一致时才置 true，绝不暴露 publisher_id 本身。
    */
   is_mine?: boolean;
+  group_id?: string;
+  group_title?: string;
+  group_count?: number;
+  group_index?: number;
+  group_rels?: string[];
+  tool_name?: string;
+  product_name?: string;
 };
 
 export type GalleryFeedResponse = {

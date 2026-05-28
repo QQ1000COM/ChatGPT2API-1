@@ -493,8 +493,17 @@ def create_router(app_version: str) -> APIRouter:
 
     @router.post("/api/images/download")
     async def download_images_endpoint(body: ImageDownloadRequest, authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        buf = download_images_zip(body.paths)
+        identity = require_identity(authorization)
+        role = str(identity.get("role") or "").lower()
+        requested = [p.strip().lstrip("/") for p in (body.paths or []) if p and p.strip()]
+        if role == "admin":
+            paths = requested
+        else:
+            user_id = str(identity.get("id") or "").strip()
+            paths = [rel for rel in requested if get_owner(rel) == user_id]
+            if not paths:
+                raise HTTPException(status_code=403, detail={"error": "无权下载这些图片"})
+        buf = download_images_zip(paths)
         return StreamingResponse(
             buf,
             media_type="application/zip",

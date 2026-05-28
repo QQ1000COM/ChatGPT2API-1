@@ -8,6 +8,7 @@ from typing import Any
 from services.config import config
 from services.content_filter import check_request
 from services.image_edits_service import is_edit as _rel_is_edit
+from services.image_task_service import get_image_task_group_index
 from services.remote_image_index_service import find_remote_image_by_rel
 
 # 画廊条目存储 schema（每条都是 dict 落进 storage.gallery_items）
@@ -76,6 +77,7 @@ def _public_view(
     image_base_url: str,
     *,
     viewer_id: str = "",
+    group_map: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """对外返回时把 image_rel 拼成完整 URL，前端不用感知 /images 前缀；
     publisher_id 不暴露给非本人，避免被遍历密钥 id（仅返回展示名）。
@@ -90,6 +92,7 @@ def _public_view(
     url = remote_url or (f"{image_base_url.rstrip('/')}/images/{rel}" if rel else "")
     pid = (item.get("publisher_id") or "").strip()
     vid = (viewer_id or "").strip()
+    group_info = (group_map or get_image_task_group_index()).get(rel, {})
     return {
         "id": item.get("id"),
         "url": url,
@@ -104,6 +107,7 @@ def _public_view(
         "created_at": item.get("created_at"),
         "status": item.get("status"),
         "is_mine": bool(vid) and pid == vid,
+        **group_info,
     }
 
 
@@ -272,8 +276,9 @@ def list_feed(
         last = page[-1]
         next_cursor = f"{last['created_at']}:{last['id']}"
 
+    group_map = get_image_task_group_index()
     return {
-        "items": [_public_view(it, image_base_url, viewer_id=viewer_id) for it in page],
+        "items": [_public_view(it, image_base_url, viewer_id=viewer_id, group_map=group_map) for it in page],
         "next_cursor": next_cursor,
     }
 

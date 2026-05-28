@@ -1,12 +1,50 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Copy, LoaderCircle, MessageCircle, RefreshCw } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Copy, Folder, LoaderCircle, MessageCircle, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { createQQBindUrl, fetchMyProfile, type MyProfile } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
+
+type ProfileImage = MyProfile["images"][number];
+type ProfileEntry =
+  | { type: "image"; id: string; item: ProfileImage }
+  | { type: "folder"; id: string; title: string; count: number; items: ProfileImage[] };
+
+function groupProfileImages(images: ProfileImage[]): ProfileEntry[] {
+  const groups = new Map<string, ProfileImage[]>();
+  const order: string[] = [];
+  for (const image of images) {
+    const key = image.group_id && (image.group_count || 0) > 1 ? image.group_id : "";
+    if (!key) {
+      order.push(`image:${image.rel}`);
+      continue;
+    }
+    if (!groups.has(key)) {
+      groups.set(key, []);
+      order.push(`group:${key}`);
+    }
+    groups.get(key)?.push(image);
+  }
+  return order.map((key) => {
+    if (key.startsWith("group:")) {
+      const id = key.slice("group:".length);
+      const items = (groups.get(id) || []).sort((a, b) => (a.group_index ?? 0) - (b.group_index ?? 0));
+      return {
+        type: "folder",
+        id,
+        title: items[0]?.group_title || "成套图片",
+        count: items[0]?.group_count || items.length,
+        items,
+      };
+    }
+    const rel = key.slice("image:".length);
+    const item = images.find((image) => image.rel === rel) || images[0];
+    return { type: "image", id: rel, item };
+  });
+}
 
 export default function ProfilePage() {
   const { isCheckingAuth, session } = useAuthGuard();
@@ -73,6 +111,8 @@ export default function ProfilePage() {
     }
   };
 
+  const imageEntries = useMemo(() => groupProfileImages(data?.images || []), [data?.images]);
+
   if (isCheckingAuth || !session || isLoading) {
     return (
       <div className="grid min-h-[60vh] place-items-center">
@@ -88,7 +128,6 @@ export default function ProfilePage() {
   const used = profile?.used ?? 0;
   const qqValue = maskQQ(profile?.qq);
   const inviteLink = typeof window !== "undefined" && profile?.id ? `${window.location.origin}/login?invite=${encodeURIComponent(profile.id)}` : "";
-
   return (
     <main className="mx-auto w-full max-w-6xl space-y-5 py-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -177,17 +216,40 @@ export default function ProfilePage() {
           {(data?.images || []).length === 0 ? (
             <div className="col-span-full grid min-h-48 place-items-center text-sm text-muted-foreground">暂无生图记录</div>
           ) : (
-            (data?.images || []).map((image) => (
-              <a key={image.rel} href={image.url} target="_blank" rel="noreferrer" className="overflow-hidden rounded-xl border border-border bg-background">
-                <div className="aspect-square bg-muted">
-                  <img src={image.thumbnail_url || image.url} alt={image.name} loading="lazy" decoding="async" className="h-full w-full object-cover" />
-                </div>
-                <div className="space-y-1 p-2">
-                  <div className="truncate text-xs font-semibold">{image.name}</div>
-                  <div className="text-[11px] text-muted-foreground">{image.created_at}</div>
-                </div>
-              </a>
-            ))
+            imageEntries.map((entry) => {
+              if (entry.type === "folder") {
+                return (
+                  <div key={entry.id} className="overflow-hidden rounded-xl border border-border bg-background">
+                    <div className="grid aspect-square grid-cols-2 gap-1 bg-muted p-2">
+                      {entry.items.slice(0, 4).map((image) => (
+                        <a key={image.rel} href={image.url} target="_blank" rel="noreferrer" className="overflow-hidden rounded-lg bg-background">
+                          <img src={image.thumbnail_url || image.url} alt={image.name} loading="lazy" decoding="async" className="h-full w-full object-cover" />
+                        </a>
+                      ))}
+                    </div>
+                    <div className="space-y-1 p-2">
+                      <div className="flex items-center gap-1 truncate text-xs font-semibold">
+                        <Folder className="size-3.5 shrink-0" />
+                        <span className="truncate">{entry.title}</span>
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">收纳盒 · {entry.count} 张</div>
+                    </div>
+                  </div>
+                );
+              }
+              const image = entry.item;
+              return (
+                <a key={image.rel} href={image.url} target="_blank" rel="noreferrer" className="overflow-hidden rounded-xl border border-border bg-background">
+                  <div className="aspect-square bg-muted">
+                    <img src={image.thumbnail_url || image.url} alt={image.name} loading="lazy" decoding="async" className="h-full w-full object-cover" />
+                  </div>
+                  <div className="space-y-1 p-2">
+                    <div className="truncate text-xs font-semibold">{image.name}</div>
+                    <div className="text-[11px] text-muted-foreground">{image.created_at}</div>
+                  </div>
+                </a>
+              );
+            })
           )}
         </div>
       </section>
