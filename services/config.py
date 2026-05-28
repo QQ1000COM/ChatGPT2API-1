@@ -210,9 +210,78 @@ def _read_json_object(path: Path, *, name: str) -> dict[str, object]:
     return data if isinstance(data, dict) else {}
 
 
+def _database_url_for_config() -> str:
+    backend = str(os.getenv("STORAGE_BACKEND") or "").strip().lower()
+    database_url = str(os.getenv("DATABASE_URL") or "").strip()
+    if backend not in {"postgres", "postgresql", "database"} or not database_url:
+        return ""
+    if database_url.startswith("sqlite:"):
+        return ""
+    return database_url
+
+
+def _load_config_from_database() -> dict[str, object]:
+    database_url = _database_url_for_config()
+    if not database_url:
+        return {}
+    try:
+        from sqlalchemy import create_engine, text
+
+        engine = create_engine(database_url, pool_pre_ping=True)
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS app_settings ("
+                    "key VARCHAR(128) PRIMARY KEY, "
+                    "data TEXT NOT NULL)"
+                )
+            )
+            row = connection.execute(
+                text("SELECT data FROM app_settings WHERE key = :key"),
+                {"key": "config"},
+            ).fetchone()
+        engine.dispose()
+        if not row:
+            return {}
+        data = json.loads(str(row[0] or "{}"))
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        print(f"[config] database config load failed, falling back to file: {exc}", file=sys.stderr)
+        return {}
+
+
+def _save_config_to_database(data: dict[str, object]) -> None:
+    database_url = _database_url_for_config()
+    if not database_url:
+        return
+    try:
+        from sqlalchemy import create_engine, text
+
+        engine = create_engine(database_url, pool_pre_ping=True)
+        payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS app_settings ("
+                    "key VARCHAR(128) PRIMARY KEY, "
+                    "data TEXT NOT NULL)"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO app_settings (key, data) VALUES (:key, :data) "
+                    "ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data"
+                ),
+                {"key": "config", "data": payload},
+            )
+        engine.dispose()
+    except Exception as exc:
+        print(f"[config] database config save failed: {exc}", file=sys.stderr)
+
+
 def _load_settings() -> LoadedSettings:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    raw_config = _read_json_object(CONFIG_FILE, name="config.json")
+    raw_config = {**_read_json_object(CONFIG_FILE, name="config.json"), **_load_config_from_database()}
     auth_key = _normalize_auth_key(os.getenv("CHATGPT2API_AUTH_KEY") or raw_config.get("auth-key"))
     if _is_invalid_auth_key(auth_key):
         raise ValueError(
@@ -248,10 +317,18 @@ class ConfigStore:
             )
 
     def _load(self) -> dict[str, object]:
-        return _read_json_object(self.path, name="config.json")
+        file_data = _read_json_object(self.path, name="config.json")
+        database_data = _load_config_from_database()
+        if database_data:
+            return {**file_data, **database_data}
+        if file_data:
+            _save_config_to_database(file_data)
+        return file_data
 
     def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        _save_config_to_database(self.data)
 
     @property
     def auth_key(self) -> str:
