@@ -17,7 +17,7 @@ import { createImageEditTask, fetchImageTasks, type ImageTask } from "@/lib/api"
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 
-type WorkMode = "detail" | "main" | "buyer" | "white" | "resize";
+type WorkMode = "detail" | "main" | "buyer" | "white" | "resize" | "replace";
 type UploadKind = "product" | "reference" | "background" | "resize";
 type JobStatus = "idle" | "queued" | "running" | "success" | "error" | "canceled";
 
@@ -48,6 +48,8 @@ type GeneratedItem = {
   error?: string;
   sourceFile?: File;
   sourceName?: string;
+  referenceFile?: File;
+  referenceName?: string;
 };
 
 const platforms = ["淘宝/天猫", "京东", "拼多多", "抖音小店", "小红书", "Amazon"];
@@ -65,6 +67,7 @@ const resizePresets: ResizePreset[] = [
 const buyerStyles = ["居家实拍", "街拍穿搭", "桌面开箱", "用户评价晒单", "种草笔记风", "真实买家随手拍"];
 const buyerCounts = [1, 2, 4, 6];
 const buyerRatios = ["1:1", "3:4", "4:5", "9:16"];
+const replaceRatios = ["1:1", "3:4", "4:5", "9:16", "16:9"];
 const buyerHumanModes = ["不出现真人，只拍产品生活场景", "出现手部/半身", "出现模特穿搭/使用"];
 const buyerRealityLevels = ["精致", "自然", "随手拍", "很真实、有轻微瑕疵"];
 const buyerPlatforms = ["淘宝评价图", "小红书种草图", "抖音橱窗图", "亚马逊 Lifestyle", "Shopee/Lazada 买家秀"];
@@ -281,7 +284,7 @@ function buildDetailItems(form: Parameters<typeof basePrompt>[0], size: string):
     },
   ];
 
-  return specs.map((spec) => ({
+  return specs.slice(0, 2).map((spec) => ({
     id: createId(),
     title: spec.title,
     subtitle: spec.subtitle,
@@ -351,6 +354,38 @@ function buildWhiteItems(form: Parameters<typeof basePrompt>[0], size: string): 
   }));
 }
 
+function buildReplaceItems(
+  form: Parameters<typeof basePrompt>[0],
+  productImages: UploadImage[],
+  referenceImages: UploadImage[],
+  size: string,
+): GeneratedItem[] {
+  const base = basePrompt({ ...form, sameStyle: true });
+  return productImages.flatMap((product, productIndex) =>
+    referenceImages.map((reference, referenceIndex) => ({
+      id: createId(),
+      title: `替换主体 ${String(productIndex + 1).padStart(2, "0")}-${String(referenceIndex + 1).padStart(2, "0")}`,
+      subtitle: `${product.file.name || `产品 ${productIndex + 1}`} / ${reference.file.name || `参考 ${referenceIndex + 1}`}`,
+      size,
+      prompt: [
+        base,
+        "",
+        "批量替换主体任务：产品图是必须保留的新商品主体，参考图是目标构图、场景、光线、机位、背景、透视、景深、阴影和整体氛围。",
+        "请把参考图里的原商品、原主体或同类物体完整替换成产品图里的商品，保持参考图原有背景和画面关系自然可信。",
+        "必须严格保留我上传产品的外观、结构、颜色、材质、比例、Logo/纹理位置和关键细节，不要混入参考图原商品的形状、品牌、颜色或装饰。",
+        "替换后的产品需要自然融入参考图环境：透视正确、大小合理、接触阴影真实、反光和环境光一致，遮挡关系自然。",
+        "不要改变参考图的主要场景、道具、人物姿态、拍摄角度和商业氛围；不要生成海报文字、二维码、水印、虚假品牌 Logo 或无关促销元素。",
+        `画面比例必须适配 ${size}。只生成一张替换后的成品图。`,
+      ].join("\n"),
+      status: "idle" as JobStatus,
+      sourceFile: product.file,
+      sourceName: product.file.name,
+      referenceFile: reference.file,
+      referenceName: reference.file.name,
+    })),
+  );
+}
+
 function buildBuyerItems(
   form: Parameters<typeof basePrompt>[0] & { usageScene: string },
   options: {
@@ -404,14 +439,14 @@ function buildBuyerItems(
     .join("\n");
   const scenes = [
     {
-      title: "买家秀 01 开箱图",
-      subtitle: "包装/桌面/刚收到",
-      prompt: "生成开箱买家秀：商品刚拆开或放在桌面/床边，包装、配件、日常杂物自然入镜，光线真实，像买家收到货后随手拍。",
+      title: "买家秀 01 上身/使用图",
+      subtitle: "真实穿搭/使用状态",
+      prompt: "生成上身或使用买家秀：按照真人模式展示商品被真实使用，动作自然，不摆拍，重点看清商品外观和使用方式，像买家真实穿搭或日常使用时随手拍。",
     },
     {
-      title: "买家秀 02 上身/使用图",
-      subtitle: "真实使用状态",
-      prompt: "生成上身或使用买家秀：按照真人模式展示商品被真实使用，动作自然，不摆拍，重点看清商品外观和使用方式。",
+      title: "买家秀 02 场景使用图",
+      subtitle: "不同角度使用状态",
+      prompt: "生成场景使用买家秀：在同一风格下换一个真实使用角度，展示商品被自然使用的状态，动作和构图区别于第 1 张，重点看清商品外观和使用方式。",
     },
     {
       title: "买家秀 03 细节图",
@@ -499,6 +534,150 @@ function downloadItem(item: GeneratedItem) {
   link.click();
 }
 
+function safeFileName(value: string) {
+  return value
+    .trim()
+    .replace(/[\\/:*?"<>|]/g, "-")
+    .replace(/\s+/g, " ")
+    .slice(0, 80) || "image";
+}
+
+function dosDateTime(date = new Date()) {
+  const time =
+    (date.getHours() << 11) |
+    (date.getMinutes() << 5) |
+    Math.floor(date.getSeconds() / 2);
+  const dosDate =
+    ((date.getFullYear() - 1980) << 9) |
+    ((date.getMonth() + 1) << 5) |
+    date.getDate();
+  return { time, date: dosDate };
+}
+
+function crc32(bytes: Uint8Array) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let index = 0; index < 8; index += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function u16(value: number) {
+  return [value & 0xff, (value >>> 8) & 0xff];
+}
+
+function u32(value: number) {
+  return [value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff];
+}
+
+async function imageSourceToBytes(src: string) {
+  const response = await fetch(src);
+  if (!response.ok) {
+    throw new Error("图片下载失败");
+  }
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+function createZipBlob(files: Array<{ name: string; bytes: Uint8Array }>) {
+  const encoder = new TextEncoder();
+  const chunks: Array<Uint8Array> = [];
+  const central: Array<Uint8Array> = [];
+  let offset = 0;
+  const stamp = dosDateTime();
+
+  for (const file of files) {
+    const nameBytes = encoder.encode(file.name);
+    const checksum = crc32(file.bytes);
+    const local = new Uint8Array([
+      ...u32(0x04034b50),
+      ...u16(20),
+      ...u16(0x0800),
+      ...u16(0),
+      ...u16(stamp.time),
+      ...u16(stamp.date),
+      ...u32(checksum),
+      ...u32(file.bytes.length),
+      ...u32(file.bytes.length),
+      ...u16(nameBytes.length),
+      ...u16(0),
+      ...nameBytes,
+    ]);
+    chunks.push(local, file.bytes);
+    central.push(
+      new Uint8Array([
+        ...u32(0x02014b50),
+        ...u16(20),
+        ...u16(20),
+        ...u16(0x0800),
+        ...u16(0),
+        ...u16(stamp.time),
+        ...u16(stamp.date),
+        ...u32(checksum),
+        ...u32(file.bytes.length),
+        ...u32(file.bytes.length),
+        ...u16(nameBytes.length),
+        ...u16(0),
+        ...u16(0),
+        ...u16(0),
+        ...u16(0),
+        ...u32(0),
+        ...u32(offset),
+        ...nameBytes,
+      ]),
+    );
+    offset += local.length + file.bytes.length;
+  }
+
+  const centralStart = offset;
+  for (const item of central) {
+    chunks.push(item);
+    offset += item.length;
+  }
+  chunks.push(
+    new Uint8Array([
+      ...u32(0x06054b50),
+      ...u16(0),
+      ...u16(0),
+      ...u16(files.length),
+      ...u16(files.length),
+      ...u32(offset - centralStart),
+      ...u32(centralStart),
+      ...u16(0),
+    ]),
+  );
+
+  const blobParts = chunks.map((chunk) => {
+    const buffer = new ArrayBuffer(chunk.byteLength);
+    new Uint8Array(buffer).set(chunk);
+    return buffer;
+  });
+  return new Blob(blobParts, { type: "application/zip" });
+}
+
+async function downloadItemsZip(items: GeneratedItem[], filename: string) {
+  const readyItems = items.filter((item) => item.status === "success" && imageSource(item));
+  if (readyItems.length === 0) {
+    toast.error("请先生成可下载的图片");
+    return;
+  }
+  const files = await Promise.all(
+    readyItems.map(async (item, index) => ({
+      name: `${String(index + 1).padStart(2, "0")}-${safeFileName(item.title)}.png`,
+      bytes: await imageSourceToBytes(imageSource(item)),
+    })),
+  );
+  const blob = createZipBlob(files);
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${safeFileName(filename)}.zip`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 function UploadStrip({
   title,
   images,
@@ -572,6 +751,7 @@ export default function DetailPageGenerator() {
   const [buyerPlatform, setBuyerPlatform] = useState(buyerPlatforms[0]);
   const [buyerConsistentScene, setBuyerConsistentScene] = useState(true);
   const [buyerBackgroundMode, setBuyerBackgroundMode] = useState("natural");
+  const [replaceRatio, setReplaceRatio] = useState("1:1");
   const [items, setItems] = useState<GeneratedItem[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [regeneratingItemIds, setRegeneratingItemIds] = useState<string[]>([]);
@@ -595,14 +775,17 @@ export default function DetailPageGenerator() {
     mode === "detail"
       ? 6
       : mode === "main"
-        ? 3
+        ? 2
         : mode === "buyer"
           ? buyerCount
           : mode === "white"
             ? 2
-            : resizeImages.length * selectedResizeRatios.length;
+            : mode === "replace"
+              ? productImages.length * referenceImages.length
+              : resizeImages.length * selectedResizeRatios.length;
   const canStitchDetail =
     mode === "detail" && items.length === 6 && items.every((item) => item.status === "success" && imageSource(item));
+  const canDownloadZip = items.some((item) => item.status === "success" && imageSource(item));
 
   const addImages = async (kind: UploadKind, files: File[]) => {
     const images = await filesToUploadImages(files);
@@ -646,13 +829,25 @@ export default function DetailPageGenerator() {
     }));
     try {
       const taskPrefix =
-        mode === "detail" ? "detail" : mode === "main" ? "main" : mode === "buyer" ? "buyer" : mode === "white" ? "white" : "resize";
+        mode === "detail"
+          ? "detail"
+          : mode === "main"
+            ? "main"
+            : mode === "buyer"
+              ? "buyer"
+              : mode === "white"
+                ? "white"
+                : mode === "replace"
+                  ? "replace"
+                  : "resize";
       const taskId = `${taskPrefix}-${createId()}`;
       const taskFiles =
         mode === "resize"
           ? item.sourceFile
             ? [item.sourceFile]
             : []
+          : mode === "replace"
+            ? [item.sourceFile, item.referenceFile].filter((file): file is File => Boolean(file))
           : mode === "white"
             ? productImages.map((image) => image.file)
             : mode === "buyer"
@@ -704,8 +899,8 @@ export default function DetailPageGenerator() {
       toast.error("请至少上传一张商品图");
       return;
     }
-    if (mode === "main" && referenceImages.length === 0) {
-      toast.error("请上传爆款主图参考图");
+    if ((mode === "main" || mode === "replace") && referenceImages.length === 0) {
+      toast.error(mode === "replace" ? "请上传需要替换主体的参考图" : "请上传爆款主图参考图");
       return;
     }
 
@@ -740,7 +935,9 @@ export default function DetailPageGenerator() {
                 hasBackgroundImage: backgroundImages.length > 0,
                 backgroundMode: buyerBackgroundModes.find((item) => item.id === buyerBackgroundMode)?.prompt || buyerBackgroundModes[1].prompt,
               })
-            : buildWhiteItems(form, "1:1");
+            : mode === "replace"
+              ? buildReplaceItems(form, productImages, referenceImages, replaceRatio)
+              : buildWhiteItems(form, "1:1");
     setItems(nextItems);
     setIsGenerating(true);
     try {
@@ -752,7 +949,9 @@ export default function DetailPageGenerator() {
             ? "爆款主图复刻生成流程已结束"
             : mode === "buyer"
               ? "买家秀生成流程已结束"
-              : "白底图生成流程已结束",
+              : mode === "replace"
+                ? "批量替换主体生成流程已结束"
+                : "白底图生成流程已结束",
       );
     } finally {
       setIsGenerating(false);
@@ -808,6 +1007,27 @@ export default function DetailPageGenerator() {
     }
   };
 
+  const handleDownloadZip = async () => {
+    const zipName =
+      mode === "detail"
+        ? "详情页分页图"
+        : mode === "main"
+          ? "爆款主图"
+          : mode === "buyer"
+            ? "买家秀"
+            : mode === "white"
+              ? "白底图"
+              : mode === "replace"
+                ? "批量替换主体"
+                : "尺寸转换图";
+    try {
+      await downloadItemsZip(items, `${productName.trim() || zipName}-${zipName}`);
+      toast.success("已打包下载");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "打包下载失败");
+    }
+  };
+
   const handleRegenerateItem = async (item: GeneratedItem) => {
     if (item.status === "queued" || item.status === "running" || regeneratingItemIds.includes(item.id)) {
       return;
@@ -815,6 +1035,11 @@ export default function DetailPageGenerator() {
     if (mode === "resize") {
       if (!item.sourceFile) {
         toast.error("这张图的原图不存在，请重新上传");
+        return;
+      }
+    } else if (mode === "replace") {
+      if (!item.sourceFile || !item.referenceFile) {
+        toast.error("这张图的产品图或参考图不存在，请重新上传");
         return;
       }
     } else if (productImages.length === 0) {
@@ -849,20 +1074,24 @@ export default function DetailPageGenerator() {
       : mode === "main"
         ? "爆款主图"
         : mode === "buyer"
-          ? "一键拍买家秀"
-          : mode === "white"
-            ? "白底图"
+        ? "一键拍买家秀"
+        : mode === "white"
+          ? "白底图"
+          : mode === "replace"
+            ? "批量替换主体"
             : "尺寸转换";
   const pageSubTitle =
     mode === "detail"
       ? "上传商品，一键生成 6 张分页详情页"
       : mode === "main"
-        ? "上传爆款参考图，一键复刻 3 张主图"
+        ? "上传爆款参考图，一键复刻 2 张主图"
         : mode === "buyer"
           ? "上传商品图和买家秀参考图，一键生成真实晒单图片"
           : mode === "white"
           ? "上传商品图，一键生成精修白底图和 3D 白底图"
-          : "上传图片，选择平台规格，一键导出多尺寸素材";
+          : mode === "replace"
+            ? "上传多张自己的产品和参考图，批量把参考图主体替换成你的产品"
+            : "上传图片，选择平台规格，一键导出多尺寸素材";
   const referenceTitle =
     mode === "detail"
       ? "参考图 / 同款风格图"
@@ -872,7 +1101,9 @@ export default function DetailPageGenerator() {
           ? "买家秀参考图（可选）"
           : mode === "white"
           ? "白底参考图（可选）"
-          : "尺寸转换";
+          : mode === "replace"
+            ? "参考图，上传需要替换主体的图片"
+            : "尺寸转换";
   const resultTitle =
     mode === "detail"
       ? "详情页分页结果"
@@ -882,7 +1113,9 @@ export default function DetailPageGenerator() {
           ? "买家秀生成结果"
           : mode === "white"
           ? "白底图生成结果"
-          : "AI 尺寸生成结果";
+          : mode === "replace"
+            ? "批量替换主体结果"
+            : "AI 尺寸生成结果";
   const emptyText =
     mode === "detail"
       ? "上传商品图、参考图并输入商品信息后，点击生成 6 张分页详情页。"
@@ -892,7 +1125,10 @@ export default function DetailPageGenerator() {
           ? "上传多角度商品图，选择风格、真人模式、平台模板和数量后，一键生成真实买家秀。"
           : mode === "white"
           ? "上传商品图并输入商品信息后，点击生成精修白底图和 3D 白底图。"
-          : "上传图片并选择比例后，点击 AI 生成尺寸图。";
+          : mode === "replace"
+            ? "上传自己的产品图和参考图后，批量把参考图里的主体替换成自己的产品。"
+            : "上传图片并选择比例后，点击 AI 生成尺寸图。";
+  const productUploadTitle = mode === "replace" ? "自己的产品图，支持多张批量替换" : "商品图，多角度上传";
 
   return (
     <main className="min-h-[calc(100dvh-3.5rem)] bg-background text-foreground [background-image:linear-gradient(to_right,rgba(15,23,42,0.06)_1px,transparent_1px),linear-gradient(to_bottom,rgba(15,23,42,0.06)_1px,transparent_1px)] [background-size:32px_32px]">
@@ -958,6 +1194,7 @@ export default function DetailPageGenerator() {
                 ["main", "爆款主图"],
                 ["buyer", "买家秀"],
                 ["white", "白底图"],
+                ["replace", "批量替换主体"],
                 ["resize", "尺寸转换"],
               ].map(([value, label]) => (
                 <button
@@ -1030,7 +1267,7 @@ export default function DetailPageGenerator() {
             ) : (
               <>
                 <UploadStrip
-                  title="商品图，多角度上传"
+                  title={productUploadTitle}
                   images={productImages}
                   onPick={() => productInputRef.current?.click()}
                   onRemove={(id) => removeImage("product", id)}
@@ -1181,6 +1418,32 @@ export default function DetailPageGenerator() {
               </div>
             )}
 
+            {mode === "replace" ? (
+              <div className="mt-3 rounded-2xl border border-border bg-background p-3">
+                <div className="mb-2 text-sm font-semibold">输出比例</div>
+                <div className="flex flex-wrap gap-2">
+                  {replaceRatios.map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      onClick={() => setReplaceRatio(option)}
+                      className={cn(
+                        "h-9 rounded-full border px-4 text-sm font-semibold transition",
+                        replaceRatio === option
+                          ? "border-foreground bg-foreground text-background"
+                          : "border-border bg-card text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </div>
+                <div className="mt-2 text-xs text-muted-foreground">
+                  建议按参考图比例选择，生成时会尽量保留参考图构图和场景，只替换主体产品。
+                </div>
+              </div>
+            ) : null}
+
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
               <input
                 value={audience}
@@ -1221,7 +1484,7 @@ export default function DetailPageGenerator() {
                       onChange={(event) => setSameStyle(event.target.checked)}
                       className="size-4 accent-foreground"
                     />
-                    {mode === "buyer" ? "同款参考复刻" : "一键同款参考图版式"}
+                    {mode === "buyer" ? "同款参考复刻" : mode === "replace" ? "保留参考图构图场景" : "一键同款参考图版式"}
                   </label>
                   {mode === "buyer" ? (
                     <label className="inline-flex cursor-pointer items-center gap-2 rounded-full bg-secondary px-3 py-2 text-sm text-muted-foreground">
@@ -1248,10 +1511,14 @@ export default function DetailPageGenerator() {
                 {mode === "detail"
                   ? "生成 6 张分页详情页"
                   : mode === "main"
-                    ? "复刻 3 张爆款主图"
+                    ? "复刻 2 张爆款主图"
                     : mode === "buyer"
                       ? `生成 ${buyerCount} 张买家秀`
-                      : "生成 2 张白底图"}
+                      : mode === "replace"
+                        ? productImages.length > 0 && referenceImages.length > 0
+                          ? `批量替换 ${productImages.length * referenceImages.length} 张`
+                          : "批量替换主体"
+                        : "生成 2 张白底图"}
               </Button>
             </div>
               </>
@@ -1296,12 +1563,24 @@ export default function DetailPageGenerator() {
                   type="button"
                   variant="outline"
                   className="rounded-full border-border bg-background text-foreground hover:bg-secondary"
+                  onClick={() => void handleDownloadZip()}
+                  disabled={!canDownloadZip}
+                >
+                  <Download className="size-4" />
+                  打包下载
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="rounded-full border-border bg-background text-foreground hover:bg-secondary"
                   onClick={() => void handleGenerate()}
                   disabled={
                     isGenerating ||
                     (mode === "resize"
                       ? resizeImages.length === 0 || selectedResizeRatios.length === 0
-                      : productImages.length === 0 || !productName.trim())
+                      : productImages.length === 0 ||
+                        !productName.trim() ||
+                        ((mode === "main" || mode === "replace") && referenceImages.length === 0))
                   }
                 >
                   <RefreshCw className="size-4" />

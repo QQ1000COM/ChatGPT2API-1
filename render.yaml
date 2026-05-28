@@ -6,7 +6,27 @@ services:
     autoDeploy: false
     envVars:
       - key: STORAGE_BACKEND
-        value: json
+        value: postgres
+      - key: DATABASE_URL
+        sync: false
+      - key: DB_SSH_TUNNEL
+        value: "true"
+      - key: DB_SSH_HOST
+        sync: false
+      - key: DB_SSH_USER
+        sync: false
+      - key: DB_SSH_PASSWORD
+        sync: false
+      - key: DB_SSH_PORT
+        value: "22"
+      - key: DB_SSH_REMOTE_HOST
+        value: 127.0.0.1
+      - key: DB_SSH_REMOTE_PORT
+        value: "8085"
+      - key: DB_SSH_LOCAL_HOST
+        value: 127.0.0.1
+      - key: DB_SSH_LOCAL_PORT
+        value: "15432"
       - key: CHATGPT2API_AUTH_KEY
         sync: false
       - key: CHATGPT2API_BASE_URL
