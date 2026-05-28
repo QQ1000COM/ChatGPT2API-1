@@ -211,6 +211,7 @@ export default function LoginPage() {
 
           <Button
             className="h-13 w-full rounded-2xl bg-[#12b7f5] text-white shadow-sm hover:bg-[#0aa7e2]"
+            style={{ minHeight: 52, backgroundColor: "#12b7f5", color: "#ffffff", WebkitTextFillColor: "#ffffff" }}
             onClick={() => void handleQQLogin()}
             disabled={isQQSubmitting || !qqEnabled}
           >
@@ -245,6 +246,7 @@ export default function LoginPage() {
 
           <Button
             className="h-13 w-full rounded-2xl bg-stone-950 text-white hover:bg-stone-800"
+            style={{ minHeight: 52, backgroundColor: "#0c0a09", color: "#ffffff", WebkitTextFillColor: "#ffffff" }}
             onClick={() => void handleLogin()}
             disabled={isSubmitting}
           >

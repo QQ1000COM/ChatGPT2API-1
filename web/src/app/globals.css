@@ -85,6 +85,90 @@
   --grid-line: oklch(0.93 0.006 260 / 0.55);
 }
 
+@supports not (color: oklch(0 0 0)) {
+  :root {
+    --background: #fbfbfd;
+    --foreground: #1f2937;
+    --card: #ffffff;
+    --card-foreground: #1f2937;
+    --popover: #ffffff;
+    --popover-foreground: #1f2937;
+    --primary: #2563eb;
+    --primary-foreground: #ffffff;
+    --secondary: #f5f5f4;
+    --secondary-foreground: #292524;
+    --muted: #f5f5f4;
+    --muted-foreground: #78716c;
+    --accent: #f5f5f4;
+    --accent-foreground: #292524;
+    --destructive: #dc2626;
+    --border: #e7e5e4;
+    --input: #e7e5e4;
+    --ring: #2563eb;
+    --chart-1: #2563eb;
+    --chart-2: #10b981;
+    --chart-3: #f59e0b;
+    --chart-4: #ef4444;
+    --chart-5: #a855f7;
+    --sidebar: #fafaf9;
+    --sidebar-foreground: #1f2937;
+    --sidebar-primary: #2563eb;
+    --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: #f5f5f4;
+    --sidebar-accent-foreground: #292524;
+    --sidebar-border: #e7e5e4;
+    --sidebar-ring: #2563eb;
+    --status-ok: #10b981;
+    --status-warn: #f59e0b;
+    --status-error: #ef4444;
+    --status-info: #0ea5e9;
+    --grid-line: rgba(231, 229, 228, 0.55);
+  }
+
+  html,
+  body {
+    background-color: #fbfbfd;
+    color: #1f2937;
+  }
+
+  .bg-background { background-color: #fbfbfd !important; }
+  .bg-foreground { background-color: #1f2937 !important; }
+  .bg-card { background-color: #ffffff !important; }
+  .bg-primary { background-color: #2563eb !important; }
+  .bg-stone-950 { background-color: #0c0a09 !important; }
+  .bg-stone-900 { background-color: #1c1917 !important; }
+  .bg-stone-800 { background-color: #292524 !important; }
+  .bg-stone-50 { background-color: #fafaf9 !important; }
+  .bg-white,
+  .bg-white\/75,
+  .bg-white\/80,
+  .bg-white\/85,
+  .bg-white\/90,
+  .bg-white\/95 { background-color: #ffffff !important; }
+  .bg-sky-50 { background-color: #f0f9ff !important; }
+  .bg-emerald-50 { background-color: #ecfdf5 !important; }
+
+  .text-background { color: #fbfbfd !important; -webkit-text-fill-color: #fbfbfd; }
+  .text-foreground { color: #1f2937 !important; -webkit-text-fill-color: #1f2937; }
+  .text-primary-foreground,
+  .text-white { color: #ffffff !important; -webkit-text-fill-color: #ffffff; }
+  .text-stone-950 { color: #0c0a09 !important; -webkit-text-fill-color: #0c0a09; }
+  .text-stone-900 { color: #1c1917 !important; -webkit-text-fill-color: #1c1917; }
+  .text-stone-800 { color: #292524 !important; -webkit-text-fill-color: #292524; }
+  .text-stone-700 { color: #44403c !important; -webkit-text-fill-color: #44403c; }
+  .text-stone-600 { color: #57534e !important; -webkit-text-fill-color: #57534e; }
+  .text-stone-500 { color: #78716c !important; -webkit-text-fill-color: #78716c; }
+  .text-stone-400 { color: #a8a29e !important; -webkit-text-fill-color: #a8a29e; }
+  .text-sky-900 { color: #0c4a6e !important; -webkit-text-fill-color: #0c4a6e; }
+  .text-emerald-900 { color: #064e3b !important; -webkit-text-fill-color: #064e3b; }
+
+  .border-border,
+  .border-stone-200 { border-color: #e7e5e4 !important; }
+  .border-white\/80 { border-color: rgba(255, 255, 255, 0.8) !important; }
+  .border-sky-100 { border-color: #e0f2fe !important; }
+  .border-emerald-100 { border-color: #d1fae5 !important; }
+}
+
 .dark {
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
