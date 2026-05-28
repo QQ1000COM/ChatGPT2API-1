@@ -15,6 +15,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from services.config import DATA_DIR
+from services.persistent_store import append_line, read_text, write_text
 from utils.helper import anthropic_sse_stream, sse_json_stream
 
 LOG_TYPE_CALL = "call"
@@ -24,6 +25,7 @@ LOG_TYPE_ACCOUNT = "account"
 class LogService:
     def __init__(self, path: Path):
         self.path = path
+        self.store_key = path.name
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -66,14 +68,14 @@ class LogService:
             "summary": summary,
             "detail": detail or data,
         }
-        with self.path.open("a", encoding="utf-8") as file:
-            file.write(self._serialize_item(item) + "\n")
+        append_line(self.store_key, self.path, self._serialize_item(item) + "\n")
 
     def list(self, type: str = "", start_date: str = "", end_date: str = "", limit: int = 200) -> list[dict[str, Any]]:
-        if not self.path.exists():
+        content = read_text(self.store_key, self.path)
+        if not content:
             return []
         items: list[dict[str, Any]] = []
-        lines = self.path.read_text(encoding="utf-8").splitlines()
+        lines = content.splitlines()
         for line_number in range(len(lines) - 1, -1, -1):
             item = self._parse_line(lines[line_number], line_number)
             if item is None:
@@ -87,9 +89,12 @@ class LogService:
 
     def delete(self, ids: list[str]) -> dict[str, int]:
         target_ids = {str(item or "").strip() for item in ids if str(item or "").strip()}
-        if not self.path.exists() or not target_ids:
+        if not target_ids:
             return {"removed": 0}
-        lines = self.path.read_text(encoding="utf-8").splitlines()
+        content = read_text(self.store_key, self.path)
+        if not content:
+            return {"removed": 0}
+        lines = content.splitlines()
         kept_lines: list[str] = []
         removed = 0
         for line_number, raw_line in enumerate(lines):
@@ -104,7 +109,7 @@ class LogService:
         content = "\n".join(kept_lines)
         if content:
             content += "\n"
-        self.path.write_text(content, encoding="utf-8")
+        write_text(self.store_key, self.path, content)
         return {"removed": removed}
 
 
