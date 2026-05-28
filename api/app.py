@@ -6,7 +6,7 @@ from threading import Event
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from api import accounts, ai, commerce_ops, gallery, image_conversations, image_tasks, register, system
@@ -55,14 +55,24 @@ def create_app() -> FastAPI:
         if remote_data_proxy_enabled() and proxy_base_url and should_proxy_path(request.url.path):
             return await proxy_remote_data_request(request, proxy_base_url)
 
-        response = await call_next(request)
         path = request.url.path
+        if (
+            path != "/"
+            and path.endswith("/")
+            and not path.startswith(("/api/", "/v1/", "/_next/", "/images/", "/image-thumbnails/"))
+        ):
+            target = request.url.replace(path=path.rstrip("/"))
+            return RedirectResponse(str(target), status_code=308)
+
+        response = await call_next(request)
         if path.startswith("/api/") or path.startswith("/v1/"):
             response.headers["Cache-Control"] = "no-store"
         elif path.startswith("/_next/static/"):
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         elif path.startswith("/images/") or path.startswith("/image-thumbnails/"):
             response.headers["Cache-Control"] = "public, max-age=86400"
+        elif response.headers.get("content-type", "").startswith("text/html"):
+            response.headers["Cache-Control"] = "no-store"
         return response
 
     app.include_router(ai.create_router())
