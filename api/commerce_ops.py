@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, ConfigDict
 
-from api.support import require_admin, require_identity, resolve_image_base_url
+from api.support import require_admin, require_identity
 from services import commerce_ops_service as ops
-from services import gallery_service
 
 
 class LooseBody(BaseModel):
@@ -19,68 +18,13 @@ def _owner_id(identity: dict[str, object]) -> str:
 def create_router() -> APIRouter:
     router = APIRouter()
 
-    @router.get("/api/templates")
-    async def list_templates(include_hidden: bool = False, authorization: str | None = Header(default=None)):
-        identity = require_identity(authorization)
-        include = include_hidden and identity.get("role") == "admin"
-        return {"items": ops.list_templates(include_hidden=include)}
-
-    @router.post("/api/templates")
-    async def save_template(body: LooseBody, authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        item = ops.save_template(body.model_dump(mode="python"))
-        return {"item": item, "items": ops.list_templates(include_hidden=True)}
-
-    @router.delete("/api/templates/{item_id}")
-    async def delete_template(item_id: str, authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        if not ops.delete_template(item_id):
-            raise HTTPException(status_code=404, detail={"error": "模板不存在"})
-        return {"items": ops.list_templates(include_hidden=True)}
-
-    @router.get("/api/home-cases")
-    async def list_home_cases(include_hidden: bool = False, authorization: str | None = Header(default=None)):
-        identity = require_identity(authorization)
-        include = include_hidden and identity.get("role") == "admin"
-        return {"items": ops.list_home_cases(include_hidden=include)}
-
-    @router.post("/api/home-cases")
-    async def save_home_case(body: LooseBody, authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        item = ops.save_home_case(body.model_dump(mode="python"))
-        return {"item": item, "items": ops.list_home_cases(include_hidden=True)}
-
-    @router.delete("/api/home-cases/{item_id}")
-    async def delete_home_case(item_id: str, authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        if not ops.delete_home_case(item_id):
-            raise HTTPException(status_code=404, detail={"error": "案例不存在"})
-        return {"items": ops.list_home_cases(include_hidden=True)}
-
-    @router.get("/api/public-home-cases")
-    async def public_home_cases(request: Request):
-        items = ops.list_home_cases(include_hidden=False)
-        if items:
-            return {"items": items[:12]}
-        feed = gallery_service.list_feed(
-            cursor=None,
-            limit=9,
-            image_base_url=resolve_image_base_url(request),
-            include_hidden=False,
-            viewer_id="",
-        )
-        return {"items": [
-            {
-                "id": item.get("id"),
-                "title": item.get("prompt") or "真实案例",
-                "image_url": item.get("url"),
-                "image_rel": item.get("image_rel"),
-                "category": item.get("model") or "画廊",
-                "hidden": False,
-                "sort": index,
-            }
-            for index, item in enumerate(feed.get("items", []))
-        ]}
+    @router.api_route("/api/templates", methods=["GET", "POST", "DELETE"])
+    @router.api_route("/api/templates/{item_id}", methods=["GET", "POST", "DELETE"])
+    @router.api_route("/api/home-cases", methods=["GET", "POST", "DELETE"])
+    @router.api_route("/api/home-cases/{item_id}", methods=["GET", "POST", "DELETE"])
+    @router.api_route("/api/public-home-cases", methods=["GET"])
+    async def removed_commerce_catalogs():
+        raise HTTPException(status_code=404, detail={"error": "该功能已删除"})
 
     @router.get("/api/me/feedback")
     async def my_feedback(authorization: str | None = Header(default=None)):

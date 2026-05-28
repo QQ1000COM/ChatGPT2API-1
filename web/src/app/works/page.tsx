@@ -48,6 +48,8 @@ import { cn } from "@/lib/utils";
  * 画图页 mount 时读一次，立刻清掉，避免下次刷新又触发。
  */
 const REDRAW_HANDOFF_KEY = "chatgpt2api:redraw_handoff";
+const WORKS_INITIAL_RENDER_LIMIT = 48;
+const WORKS_RENDER_STEP = 48;
 
 function imageKey(item: ManagedImage) {
   return item.rel || item.url;
@@ -65,9 +67,27 @@ function formatRelative(value: string) {
   return value.slice(0, 10);
 }
 
+function WorksSkeletonGrid() {
+  return (
+    <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+      {Array.from({ length: 15 }).map((_, index) => (
+        <div
+          key={index}
+          className="overflow-hidden rounded-2xl bg-white/80 shadow-sm ring-1 ring-stone-200/70"
+          style={{ aspectRatio: index % 3 === 0 ? "4 / 5" : index % 3 === 1 ? "1 / 1" : "3 / 4" }}
+        >
+          <div className="h-full w-full animate-pulse bg-gradient-to-br from-stone-100 via-stone-200/70 to-stone-100" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function WorksPageContent() {
   const [items, setItems] = useState<ManagedImage[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [renderLimit, setRenderLimit] = useState(WORKS_INITIAL_RENDER_LIMIT);
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const [focused, setFocused] = useState<ManagedImage | null>(null);
   const [feedback, setFeedback] = useState<Map<string, ImageFeedback>>(() => new Map());
   const [noteDraft, setNoteDraft] = useState("");
@@ -168,6 +188,25 @@ function WorksPageContent() {
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  useEffect(() => {
+    setRenderLimit(WORKS_INITIAL_RENDER_LIMIT);
+  }, [items.length]);
+
+  useEffect(() => {
+    const el = loadMoreRef.current;
+    if (!el || renderLimit >= items.length) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setRenderLimit((current) => Math.min(items.length, current + WORKS_RENDER_STEP));
+        }
+      },
+      { rootMargin: "900px 0px" },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [items.length, renderLimit]);
 
   /**
    * 用此图重画：把 rel + prompt 写进 sessionStorage，跳到画图页。
@@ -351,6 +390,7 @@ function WorksPageContent() {
   }, [focused, pendingDelete]);
 
   const visibleCount = items.length;
+  const renderedItems = items.slice(0, Math.min(items.length, renderLimit));
 
   // 关闭弹窗时，focused 立刻置 null 会让 {focused ? ... : null} 内容瞬间从 DOM 消失，
   // 剩下空的 DialogContent 在 Radix 200ms 淡出缩放里收缩成一条白线（用户反馈的"中间闪白线"）。
@@ -400,16 +440,7 @@ function WorksPageContent() {
         </div>
       </section>
 
-      {isLoading && items.length === 0 ? (
-        <Card className="mt-6 rounded-2xl border-white/80 bg-white/90 shadow-sm">
-          <CardContent className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
-            <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
-              <LoaderCircle className="size-5 animate-spin" />
-            </div>
-            <p className="text-sm text-stone-500">从云端拉取你的图片…</p>
-          </CardContent>
-        </Card>
-      ) : null}
+      {isLoading && items.length === 0 ? <WorksSkeletonGrid /> : null}
 
       {!isLoading && items.length === 0 ? (
         <Card className="mt-6 rounded-2xl border-white/80 bg-white/90 shadow-sm">
@@ -450,7 +481,7 @@ function WorksPageContent() {
           const buckets: ManagedImage[][] = Array.from({ length: cols }, () => []);
           // 列内累计"高度"近似值：用 1/ratio (= height/width) 做单位列宽下的相对高度
           const heights = new Array(cols).fill(0);
-          for (const item of items) {
+          for (const item of renderedItems) {
             const w = item.width && item.width > 0 ? item.width : 1;
             const h = item.height && item.height > 0 ? item.height : 1;
             const relativeH = h / w;
@@ -487,6 +518,8 @@ function WorksPageContent() {
                       src={item.url}
                       alt={item.prompt?.slice(0, 30) || item.name}
                       loading="lazy"
+                      decoding="async"
+                      fetchPriority="low"
                       className="h-full w-full object-cover"
                     />
                     {state === "published" ? (
@@ -516,6 +549,12 @@ function WorksPageContent() {
         })()}
       </div>
 
+      {renderLimit < items.length ? (
+        <div ref={loadMoreRef} className="grid h-24 place-items-center text-xs text-stone-400">
+          加载更多作品...
+        </div>
+      ) : null}
+
       {/* 详情 Dialog */}
       <Dialog open={focused !== null} onOpenChange={(open) => (!open ? setFocused(null) : null)}>
         <DialogContent
@@ -533,6 +572,7 @@ function WorksPageContent() {
                 <img
                   src={focusedView.url}
                   alt={focusedView.prompt?.slice(0, 30) || focusedView.name}
+                  decoding="async"
                   className="block h-auto w-full"
                 />
                 <div className="absolute top-3 right-3 flex items-center gap-1.5">
@@ -756,11 +796,7 @@ export default function WorksPage() {
   const { isCheckingAuth, session } = useAuthGuard();
 
   if (isCheckingAuth || !session) {
-    return (
-      <div className="flex min-h-[40vh] items-center justify-center">
-        <LoaderCircle className="size-5 animate-spin text-stone-400" />
-      </div>
-    );
+    return <WorksSkeletonGrid />;
   }
 
   return <WorksPageContent />;

@@ -776,6 +776,9 @@ function ImageManagerContent() {
                     <img
                       src={item.thumbnail_url || item.url}
                       alt={item.name}
+                      loading="lazy"
+                      decoding="async"
+                      fetchPriority="low"
                       className="h-full w-full object-cover transition group-hover:scale-[1.02]"
                       onError={(event) => {
                         if (event.currentTarget.src !== item.url) {
@@ -993,6 +996,7 @@ function ImageManagerContent() {
               <img
                 src={deleteTarget.thumbnail_url || deleteTarget.url}
                 alt=""
+                decoding="async"
                 className="size-16 shrink-0 rounded-lg object-cover"
                 onError={(e) => { if (e.currentTarget.src !== deleteTarget.url) e.currentTarget.src = deleteTarget.url; }}
               />
@@ -1090,6 +1094,7 @@ function ImageManagerContent() {
               <img
                 src={pendingPublish.thumbnail_url || pendingPublish.url}
                 alt=""
+                decoding="async"
                 className="size-16 shrink-0 rounded-lg object-cover"
                 onError={(e) => { if (e.currentTarget.src !== pendingPublish.url) e.currentTarget.src = pendingPublish.url; }}
               />

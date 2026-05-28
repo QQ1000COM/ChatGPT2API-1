@@ -51,6 +51,7 @@ export type CommerceSuitePrompt = {
 };
 
 const COMMERCE_STORAGE_KEY = "image-commerce-draft";
+let commerceStorageTimer: number | null = null;
 const COMMERCE_PLATFORMS = ["淘宝/天猫", "京东", "拼多多", "抖音小店", "小红书", "Amazon"];
 const COMMERCE_STYLES = ["高级简洁", "白底质感", "直播爆款", "国潮氛围", "科技冷感", "温暖生活方式", "轻奢礼盒"];
 const COMMERCE_TEMPLATES: Array<{
@@ -281,7 +282,23 @@ export function ImageComposer({
   }, []);
 
   useEffect(() => {
-    window.localStorage.setItem(COMMERCE_STORAGE_KEY, JSON.stringify(commerceDraft));
+    if (commerceStorageTimer) {
+      window.clearTimeout(commerceStorageTimer);
+    }
+    commerceStorageTimer = window.setTimeout(() => {
+      try {
+        window.localStorage.setItem(COMMERCE_STORAGE_KEY, JSON.stringify(commerceDraft));
+      } catch {
+        // localStorage may be blocked or full.
+      }
+      commerceStorageTimer = null;
+    }, 300);
+    return () => {
+      if (commerceStorageTimer) {
+        window.clearTimeout(commerceStorageTimer);
+        commerceStorageTimer = null;
+      }
+    };
   }, [commerceDraft]);
 
   const updateCommerceDraft = <Key extends keyof CommerceDraft>(key: Key, value: CommerceDraft[Key]) => {

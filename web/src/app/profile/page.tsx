@@ -180,7 +180,7 @@ export default function ProfilePage() {
             (data?.images || []).map((image) => (
               <a key={image.rel} href={image.url} target="_blank" rel="noreferrer" className="overflow-hidden rounded-xl border border-border bg-background">
                 <div className="aspect-square bg-muted">
-                  <img src={image.thumbnail_url || image.url} alt={image.name} className="h-full w-full object-cover" />
+                  <img src={image.thumbnail_url || image.url} alt={image.name} loading="lazy" decoding="async" className="h-full w-full object-cover" />
                 </div>
                 <div className="space-y-1 p-2">
                   <div className="truncate text-xs font-semibold">{image.name}</div>

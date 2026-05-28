@@ -8,7 +8,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { createQQLoginUrl, fetchPublicConfig, fetchPublicHomeCases, login } from "@/lib/api";
+import { createQQLoginUrl, fetchPublicCases, fetchPublicConfig, login } from "@/lib/api";
 import { primeAuthSessionCache } from "@/lib/auth-session";
 import { useRedirectIfAuthenticated } from "@/lib/use-auth-guard";
 import { getDefaultRouteForRole, setStoredAuthSession } from "@/store/auth";
@@ -77,8 +77,8 @@ export default function LoginPage() {
         setInviteReward(Math.max(0, Number(config.invite_reward_quota) || 0));
       })
       .catch(() => undefined);
-    void fetchPublicHomeCases()
-      .then((data) => setCases((data.items || []).filter((item) => item.image_url).map((item) => ({ id: item.id, url: item.image_url, prompt: item.title })).slice(0, 6)))
+    void fetchPublicCases()
+      .then((data) => setCases((data.items || []).filter((item) => item.url).map((item) => ({ id: item.id, url: item.url, prompt: item.prompt })).slice(0, 6)))
       .catch(() => undefined);
   }, []);
 

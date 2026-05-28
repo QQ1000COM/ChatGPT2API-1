@@ -578,56 +578,6 @@ export async function fetchPublicCases() {
   return httpRequest<{ items: GalleryItem[]; next_cursor: string }>("/api/public-cases", { redirectOnUnauthorized: false });
 }
 
-export type CommerceTemplate = {
-  id: string;
-  title: string;
-  description: string;
-  example_url: string;
-  prompt: string;
-  platform: string;
-  tool_url: string;
-  hidden: boolean;
-  sort: number;
-};
-
-export type HomeCase = {
-  id: string;
-  title: string;
-  image_url: string;
-  image_rel: string;
-  category: string;
-  hidden: boolean;
-  sort: number;
-};
-
-export async function fetchTemplates(includeHidden = false) {
-  return httpRequest<{ items: CommerceTemplate[] }>(`/api/templates${includeHidden ? "?include_hidden=true" : ""}`);
-}
-
-export async function saveTemplate(payload: Partial<CommerceTemplate>) {
-  return httpRequest<{ item: CommerceTemplate; items: CommerceTemplate[] }>("/api/templates", { method: "POST", body: payload });
-}
-
-export async function deleteTemplate(id: string) {
-  return httpRequest<{ items: CommerceTemplate[] }>(`/api/templates/${encodeURIComponent(id)}`, { method: "DELETE" });
-}
-
-export async function fetchHomeCases(includeHidden = false) {
-  return httpRequest<{ items: HomeCase[] }>(`/api/home-cases${includeHidden ? "?include_hidden=true" : ""}`);
-}
-
-export async function fetchPublicHomeCases() {
-  return httpRequest<{ items: HomeCase[] }>("/api/public-home-cases", { redirectOnUnauthorized: false });
-}
-
-export async function saveHomeCase(payload: Partial<HomeCase>) {
-  return httpRequest<{ item: HomeCase; items: HomeCase[] }>("/api/home-cases", { method: "POST", body: payload });
-}
-
-export async function deleteHomeCase(id: string) {
-  return httpRequest<{ items: HomeCase[] }>(`/api/home-cases/${encodeURIComponent(id)}`, { method: "DELETE" });
-}
-
 export type ImageFeedback = {
   id: string;
   image_rel: string;

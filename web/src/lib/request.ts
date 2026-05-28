@@ -81,15 +81,70 @@ type RequestOptions = {
     redirectOnUnauthorized?: boolean;
 };
 
+const inflightGetRequests = new Map<string, Promise<unknown>>();
+const getResponseCache = new Map<string, {expiresAt: number; value: unknown}>();
+
+const CACHEABLE_GETS: Array<{prefix: string; ttl: number}> = [
+    {prefix: "/api/public-config", ttl: 30_000},
+    {prefix: "/api/public-cases", ttl: 30_000},
+    {prefix: "/api/me/onboarding", ttl: 10_000},
+];
+
+function cachePolicyForPath(path: string) {
+    return CACHEABLE_GETS.find((item) => path.startsWith(item.prefix));
+}
+
+function getRequestKey(path: string, options: RequestOptions) {
+    return JSON.stringify({
+        path,
+        method: (options.method || "GET").toUpperCase(),
+        headers: options.headers || {},
+        redirectOnUnauthorized: options.redirectOnUnauthorized !== false,
+    });
+}
+
 export async function httpRequest<T>(path: string, options: RequestOptions = {}) {
     const {method = "GET", body, headers, redirectOnUnauthorized = true} = options;
+    const upperMethod = method.toUpperCase();
+    const cacheKey = getRequestKey(path, options);
+    const cachePolicy = upperMethod === "GET" ? cachePolicyForPath(path) : undefined;
+    if (cachePolicy) {
+        const cached = getResponseCache.get(cacheKey);
+        if (cached && cached.expiresAt > Date.now()) {
+            return cached.value as T;
+        }
+    }
+    if (upperMethod === "GET") {
+        const inflight = inflightGetRequests.get(cacheKey);
+        if (inflight) {
+            return inflight as Promise<T>;
+        }
+    } else {
+        getResponseCache.clear();
+    }
+
     const config: RequestConfig = {
         url: path,
-        method,
+        method: upperMethod,
         data: body,
         headers,
         redirectOnUnauthorized,
     };
-    const response = await request.request<T>(config);
-    return response.data;
+    const promise = request.request<T>(config).then((response) => {
+        if (cachePolicy) {
+            getResponseCache.set(cacheKey, {
+                expiresAt: Date.now() + cachePolicy.ttl,
+                value: response.data,
+            });
+        }
+        return response.data;
+    });
+    if (upperMethod === "GET") {
+        inflightGetRequests.set(cacheKey, promise);
+        promise.then(
+            () => inflightGetRequests.delete(cacheKey),
+            () => inflightGetRequests.delete(cacheKey),
+        );
+    }
+    return promise;
 }

@@ -5,6 +5,7 @@ from threading import Event
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -44,6 +45,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
 
     # 动态接口禁缓存：/api/* 与 /v1/* 都是后端业务数据，浏览器若自行启发式缓存
     # 会出现"改了配置/数据但 UI 不更新"的诡异现象。一律 no-store 让每次都打到后端。
@@ -57,6 +59,10 @@ def create_app() -> FastAPI:
         path = request.url.path
         if path.startswith("/api/") or path.startswith("/v1/"):
             response.headers["Cache-Control"] = "no-store"
+        elif path.startswith("/_next/static/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        elif path.startswith("/images/") or path.startswith("/image-thumbnails/"):
+            response.headers["Cache-Control"] = "public, max-age=86400"
         return response
 
     app.include_router(ai.create_router())

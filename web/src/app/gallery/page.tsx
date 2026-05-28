@@ -385,6 +385,8 @@ function GalleryPageContent({ isAdmin }: { isAdmin: boolean }) {
                     src={item.url}
                     alt={item.prompt.slice(0, 30) || "作品"}
                     loading="lazy"
+                    decoding="async"
+                    fetchPriority="low"
                     className="h-full w-full object-cover transition group-hover:scale-[1.02]"
                   />
                   {isHidden ? (
@@ -452,6 +454,7 @@ function GalleryPageContent({ isAdmin }: { isAdmin: boolean }) {
                 <img
                   src={focusedView.url}
                   alt={focusedView.prompt.slice(0, 30) || "作品"}
+                  decoding="async"
                   className="relative mx-auto block h-auto max-h-[65vh] w-full object-contain"
                 />
               </div>

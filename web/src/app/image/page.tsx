@@ -51,6 +51,25 @@ const IMAGE_COUNT_STORAGE_KEY = "chatgpt2api:image_last_count";
 // 每个会话的滚动位置单独存。用 sessionStorage 因为这就是"会话级"的临时位置，
 // 关浏览器后从底部重看更自然；要跨浏览器会话保留改成 localStorage 即可。
 const SCROLL_POSITION_STORAGE_KEY = "chatgpt2api:image_scroll_positions";
+const localStorageWriteTimers = new Map<string, number>();
+
+function scheduleLocalStorageSet(key: string, value: string, delay = 250) {
+  if (typeof window === "undefined") return;
+  const currentTimer = localStorageWriteTimers.get(key);
+  if (currentTimer) {
+    window.clearTimeout(currentTimer);
+  }
+  const timer = window.setTimeout(() => {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch {
+      // localStorage may be blocked or full.
+    } finally {
+      localStorageWriteTimers.delete(key);
+    }
+  }, delay);
+  localStorageWriteTimers.set(key, timer);
+}
 
 function clampImageCount(value: string) {
   return String(Math.min(100, Math.max(1, Math.floor(Number(value) || 1))));
@@ -746,10 +765,10 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     }
 
     if (selectedConversationId) {
-      window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, selectedConversationId);
+      scheduleLocalStorageSet(ACTIVE_CONVERSATION_STORAGE_KEY, selectedConversationId);
     } else {
       // 空串作为"用户主动进入空状态"的标记，区别于从未设置的 null
-      window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, "");
+      scheduleLocalStorageSet(ACTIVE_CONVERSATION_STORAGE_KEY, "");
     }
   }, [selectedConversationId]);
 
@@ -759,7 +778,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     }
 
     if (imageSize) {
-      window.localStorage.setItem(IMAGE_SIZE_STORAGE_KEY, imageSize);
+      scheduleLocalStorageSet(IMAGE_SIZE_STORAGE_KEY, imageSize);
       return;
     }
     window.localStorage.removeItem(IMAGE_SIZE_STORAGE_KEY);
@@ -767,7 +786,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
   useEffect(() => {
     if (typeof window !== "undefined" && parsedCount > 0) {
-      window.localStorage.setItem(IMAGE_COUNT_STORAGE_KEY, String(parsedCount));
+      scheduleLocalStorageSet(IMAGE_COUNT_STORAGE_KEY, String(parsedCount));
     }
   }, [parsedCount]);
 

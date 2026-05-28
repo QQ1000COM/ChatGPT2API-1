@@ -13,9 +13,7 @@ const adminNavItems = [
   { href: "/image", label: "画图" },
   { href: "/detail-page", label: "电商工具箱" },
   { href: "/task-center", label: "任务中心" },
-  { href: "/templates", label: "模板市场" },
   { href: "/gallery", label: "画廊" },
-  { href: "/case-manager", label: "案例管理" },
   { href: "/accounts", label: "号池管理" },
   { href: "/register", label: "注册机" },
   { href: "/image-manager", label: "图片管理" },
@@ -28,7 +26,6 @@ const userNavItems = [
   { href: "/image", label: "画图" },
   { href: "/detail-page", label: "电商工具箱" },
   { href: "/task-center", label: "任务中心" },
-  { href: "/templates", label: "模板市场" },
   { href: "/works", label: "我的作品" },
   { href: "/gallery", label: "画廊" },
   { href: "/profile", label: "个人中心" },
@@ -122,6 +119,17 @@ export function TopNav() {
     clearAuthSessionCache();
     router.replace("/login");
   };
+
+  useEffect(() => {
+    if (!session || pathname === "/login") return;
+    const routes = session.role === "admin"
+      ? ["/image", "/detail-page", "/task-center", "/gallery", "/image-manager", "/settings"]
+      : ["/image", "/detail-page", "/task-center", "/works", "/gallery", "/profile"];
+    const timer = window.setTimeout(() => {
+      routes.forEach((route) => router.prefetch(route));
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [pathname, router, session]);
 
   // 一根"会滑动的下划线"：默认贴在当前页那项下面，hover 哪项就滑到哪项，
   // 鼠标离开整条 nav 后回到 active 项。Vercel / Linear / Apple 同套路。
@@ -226,9 +234,11 @@ export function TopNav() {
                 }}
                 href={item.href}
                 onMouseEnter={() => {
+                  router.prefetch(item.href);
                   const r = measure(item.href);
                   if (r) setHoverRect(r);
                 }}
+                onFocus={() => router.prefetch(item.href)}
                 className={cn(
                   "relative shrink-0 cursor-pointer whitespace-nowrap px-3 py-1.5 text-[13px] font-medium leading-none transition-colors duration-200",
                   active ? "text-foreground" : "text-muted-foreground hover:text-foreground",

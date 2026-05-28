@@ -45,6 +45,8 @@
 
 :root {
   --radius: 0.625rem;
+  --font-sans: "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Cascadia Mono", "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   --background: oklch(0.992 0.002 264);
   --foreground: oklch(0.18 0.018 260);
   --card: oklch(1 0 0);
