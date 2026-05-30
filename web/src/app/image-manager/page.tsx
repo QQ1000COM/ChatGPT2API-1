@@ -17,6 +17,7 @@ import { dedupeManagedImages, deleteImageTag, deleteManagedImages, downloadImage
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const LONG_PRESS_MS = 800;
+const IMAGE_MANAGER_CHECKBOX_CLASS = "border-stone-300 bg-white/80 dark:border-white/35 dark:bg-white/5 data-[state=checked]:border-stone-950 dark:data-[state=checked]:border-white";
 
 function formatSize(size: number) {
   return size > 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(2)} MB` : `${Math.ceil(size / 1024)} KB`;
@@ -896,11 +897,11 @@ function ImageManagerContent() {
               共 {filteredItems.length} 张
               {selectedTags.length > 0 ? <span className="text-stone-400">（筛选自 {items.length} 张）</span> : null}
               <label className="flex items-center gap-2">
-                <Checkbox checked={currentPageSelected} onCheckedChange={(checked) => togglePaths(currentRows.flatMap(entryPaths), Boolean(checked))} />
+                <Checkbox className={IMAGE_MANAGER_CHECKBOX_CLASS} checked={currentPageSelected} onCheckedChange={(checked) => togglePaths(currentRows.flatMap(entryPaths), Boolean(checked))} />
                 本页全选
               </label>
               <label className="flex items-center gap-2">
-                <Checkbox checked={allSelected} onCheckedChange={(checked) => togglePaths(filteredItems.map(imageKey), Boolean(checked))} />
+                <Checkbox className={IMAGE_MANAGER_CHECKBOX_CLASS} checked={allSelected} onCheckedChange={(checked) => togglePaths(filteredItems.map(imageKey), Boolean(checked))} />
                 全选结果
               </label>
               {selectedPaths.length > 0 ? <span>已选 {selectedPaths.length} 张</span> : null}
@@ -930,7 +931,7 @@ function ImageManagerContent() {
                 const folderSelected = paths.every((path) => selectedSet.has(path));
                 const firstIndex = filteredItems.findIndex((row) => row.url === entry.items[0]?.url);
                 return (
-                  <div key={entry.id} className="group border-r border-b border-stone-100 p-4 transition hover:bg-stone-50">
+                  <div key={entry.id} className="group border-r border-b border-stone-100 p-4 transition hover:bg-stone-50 dark:hover:bg-white/5">
                     <button
                       type="button"
                       className="relative block aspect-square w-full cursor-zoom-in overflow-hidden rounded-lg bg-white p-2 text-left"
@@ -966,7 +967,7 @@ function ImageManagerContent() {
                     <div className="mt-3 space-y-2 text-xs text-stone-500">
                       <div className="flex items-center justify-between gap-2">
                         <div className="min-w-0 truncate font-medium text-stone-700">{entry.title}</div>
-                        <Checkbox checked={folderSelected} onCheckedChange={(checked) => togglePaths(paths, Boolean(checked))} />
+                        <Checkbox className={IMAGE_MANAGER_CHECKBOX_CLASS} checked={folderSelected} onCheckedChange={(checked) => togglePaths(paths, Boolean(checked))} />
                       </div>
                       <div className="flex items-center justify-between gap-2">
                         <span>收纳盒</span>
@@ -994,7 +995,7 @@ function ImageManagerContent() {
               const publishState = publishStates.get(item.rel);
               const publishedBy = publisherNames.get(item.rel);
               return (
-              <div key={item.rel} className="group border-r border-b border-stone-100 p-4 transition hover:bg-stone-50">
+              <div key={item.rel} className="group border-r border-b border-stone-100 p-4 transition hover:bg-stone-50 dark:hover:bg-white/5">
                 <div className="relative">
                   <button
                     type="button"
@@ -1120,7 +1121,7 @@ function ImageManagerContent() {
                       >
                         <Copy className="size-4" />
                       </Button>
-                      <Checkbox checked={selectedSet.has(imageKey(item))} onCheckedChange={(checked) => togglePaths([imageKey(item)], Boolean(checked))} />
+                      <Checkbox className={IMAGE_MANAGER_CHECKBOX_CLASS} checked={selectedSet.has(imageKey(item))} onCheckedChange={(checked) => togglePaths([imageKey(item)], Boolean(checked))} />
                     </div>
                   </div>
                   <div className="flex items-center justify-between gap-2">

@@ -17,7 +17,7 @@ import { cn } from "@/lib/utils";
 import { getStoredAuthKey } from "@/store/auth";
 
 type ChatRole = "user" | "assistant";
-type ChatMode = "chat" | "responses" | "codex";
+type ChatMode = "chat" | "responses" | "codex" | "search";
 type ChatView = "chat" | "prompts" | "favorites";
 
 type Attachment = {
@@ -158,6 +158,27 @@ function contentFromResponse(data: unknown) {
   return text || JSON.stringify(data, null, 2);
 }
 
+function contentFromSearch(data: unknown) {
+  const item = data as {
+    answer?: string;
+    conversation_id?: string;
+    sources?: Array<{ title?: string; url?: string; snippet?: string }>;
+    _account_email?: string;
+  };
+  const answer = String(item.answer || "").trim() || JSON.stringify(data, null, 2);
+  const sources = Array.isArray(item.sources) ? item.sources.filter((source) => source?.url) : [];
+  const sourceText = sources.length
+    ? "\n\n### 搜索来源\n" + sources.slice(0, 10).map((source, index) => {
+        const title = String(source.title || source.url || `来源 ${index + 1}`).trim();
+        const url = String(source.url || "").trim();
+        const snippet = String(source.snippet || "").trim();
+        return `${index + 1}. [${title}](${url})${snippet ? `\n   ${snippet}` : ""}`;
+      }).join("\n")
+    : "";
+  const meta = item.conversation_id ? `\n\n> 搜索会话：${item.conversation_id}` : "";
+  return `${answer}${sourceText}${meta}`.trim();
+}
+
 async function fetchJson(path: string, init: RequestInit = {}) {
   const authKey = await getStoredAuthKey();
   const response = await fetch(`${webConfig.apiUrl.replace(/\/$/, "")}${path}`, {
@@ -220,6 +241,15 @@ async function streamChat(conversation: Conversation, messages: Message[], signa
 
 async function callModel(conversation: Conversation, messages: Message[], signal: AbortSignal) {
   const attachmentsCount = messages.reduce((sum, message) => sum + (message.attachments?.length || 0), 0);
+  if (conversation.mode === "search") {
+    const prompt = messages.filter((message) => message.role === "user").at(-1)?.content || "";
+    const data = await fetchJson("/v1/search", {
+      method: "POST",
+      body: JSON.stringify({ model: conversation.model, prompt, timeout_secs: 300 }),
+      signal,
+    });
+    return contentFromSearch(data);
+  }
   if (conversation.mode === "responses" || conversation.mode === "codex") {
     const tools = conversation.mode === "codex"
       ? [
@@ -449,6 +479,10 @@ export default function ChatPage() {
       toast.error("当前账号没有代码能力权限");
       return;
     }
+    if (active.mode === "search" && !chatPermissions.includes("web")) {
+      toast.error("当前账号没有联网搜索权限");
+      return;
+    }
     if (attachments.length && !chatPermissions.includes("attachments")) {
       toast.error("当前账号没有附件上传权限");
       return;
@@ -513,7 +547,7 @@ export default function ChatPage() {
           <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-foreground text-background"><MessageCircle className="size-5" /></span>
           <div className="min-w-0">
             <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">AI 对话工作台</h1>
-            <p className="truncate text-xs text-muted-foreground">{session?.name || "当前账号"} · 对话 / Responses / Codex 工具调用预览</p>
+            <p className="truncate text-xs text-muted-foreground">{session?.name || "当前账号"} · 对话 / 搜索 / Responses / Codex 工具调用预览</p>
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -555,7 +589,7 @@ export default function ChatPage() {
               <div ref={viewportRef} className="min-h-0 flex-1 overflow-y-auto p-4">
                 {activeMessages.length === 0 ? (
                   <div className="grid min-h-80 place-items-center text-center text-sm text-muted-foreground">
-                    <div><Bot className="mx-auto mb-3 size-8" /><div>开始一个普通对话，或切到 Responses / Codex 模式。</div></div>
+                    <div><Bot className="mx-auto mb-3 size-8" /><div>开始一个普通对话，或切到搜索 / Responses / Codex 模式。</div></div>
                   </div>
                 ) : (
                   <div className="space-y-4">
@@ -624,7 +658,7 @@ export default function ChatPage() {
               <div className="grid grid-cols-2 gap-2">
                 <Select value={active.mode} onValueChange={(value) => setMode(value as ChatMode)}>
                   <SelectTrigger className="h-10 rounded-xl"><SelectValue /></SelectTrigger>
-                  <SelectContent><SelectItem value="chat">普通对话</SelectItem><SelectItem value="responses">Responses</SelectItem><SelectItem value="codex">Codex 写代码</SelectItem></SelectContent>
+                  <SelectContent><SelectItem value="chat">普通对话</SelectItem><SelectItem value="search">联网搜索</SelectItem><SelectItem value="responses">Responses</SelectItem><SelectItem value="codex">Codex 写代码</SelectItem></SelectContent>
                 </Select>
                 <Select value={active.model} onValueChange={setModel}>
                   <SelectTrigger className="h-10 rounded-xl"><SelectValue /></SelectTrigger>

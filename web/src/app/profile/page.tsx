@@ -244,6 +244,7 @@ export default function ProfilePage() {
               ["输出 Token", formatNumber(apiUsage?.output_tokens)],
               ["Chat", formatNumber(apiUsage?.chat_calls)],
               ["Responses", formatNumber(apiUsage?.response_calls)],
+              ["搜索", formatNumber(apiUsage?.search_calls)],
               ["图片/任务", formatNumber(apiUsage?.image_calls)],
               ["附件", formatNumber(apiUsage?.attachments)],
               ["生成图片", formatNumber(apiUsage?.images)],

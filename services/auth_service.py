@@ -30,6 +30,7 @@ API_ENDPOINTS = {
     "models",
     "messages",
     "image_tasks",
+    "search",
 }
 CHAT_FEATURES = {
     "chat",
@@ -44,6 +45,7 @@ USAGE_COUNTERS = {
     "message_calls",
     "image_calls",
     "model_calls",
+    "search_calls",
     "input_tokens",
     "output_tokens",
     "images",
@@ -493,6 +495,7 @@ class AuthService:
                     "images": "image_calls",
                     "models": "model_calls",
                     "image_tasks": "image_calls",
+                    "search": "search_calls",
                 }.get(str(endpoint or "").strip(), "")
                 if endpoint_key:
                     usage[endpoint_key] = usage.get(endpoint_key, 0) + 1

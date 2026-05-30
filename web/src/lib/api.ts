@@ -256,6 +256,7 @@ export type MyProfile = {
       message_calls: number;
       image_calls: number;
       model_calls: number;
+      search_calls: number;
       input_tokens: number;
       output_tokens: number;
       images: number;

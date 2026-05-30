@@ -17,6 +17,7 @@ from services.protocol import (
     openai_v1_image_generations,
     openai_v1_models,
     openai_v1_response,
+    openai_search,
 )
 from services.protocol.conversation import count_message_image_tokens, count_message_text_tokens
 from services.protocol.response_store import delete_response, get_response, list_input_items, store_response, update_response_status
@@ -65,6 +66,13 @@ class AnthropicMessageRequest(BaseModel):
     messages: list[dict[str, object]] | None = None
     system: object | None = None
     stream: bool | None = None
+
+
+class SearchRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    prompt: str = Field(..., min_length=1)
+    model: str | None = None
+    timeout_secs: float | None = Field(default=None, ge=5, le=600)
 
 
 def _rough_token_count(value: object) -> int:
@@ -407,6 +415,26 @@ def create_router() -> APIRouter:
                 input_tokens=_rough_token_count(payload.get("messages")),
                 output_tokens=_response_text_tokens(result),
             )
+            return result
+
+    @router.post("/v1/search")
+    async def search(body: SearchRequest, authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        require_chat_feature(identity, "chat")
+        require_chat_feature(identity, "web")
+        payload = body.model_dump(mode="python")
+        model = openai_search.resolve_model(payload.get("model"))
+        with guard_api_request(identity, "search", model):
+            call = LoggedCall(identity, "/v1/search", model, "Search", request_text=body.prompt)
+            await filter_or_log(call, body.prompt)
+            result = await call.run(openai_search.handle, payload)
+            if isinstance(result, dict):
+                _record_usage(
+                    identity,
+                    "search",
+                    input_tokens=_rough_token_count(body.prompt),
+                    output_tokens=_rough_token_count(result.get("answer") or result),
+                )
             return result
 
     return router

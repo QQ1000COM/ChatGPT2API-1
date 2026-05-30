@@ -29,6 +29,7 @@ API_USAGE_COUNTERS = (
     "message_calls",
     "image_calls",
     "model_calls",
+    "search_calls",
     "input_tokens",
     "output_tokens",
     "images",
@@ -115,6 +116,7 @@ def _api_usage_summary(profile: dict[str, object]) -> dict[str, object]:
         + usage["message_calls"]
         + usage["image_calls"]
         + usage["model_calls"]
+        + usage["search_calls"]
     )
     return {
         "usage": usage,
