@@ -2819,7 +2819,7 @@ export default function DetailPageGenerator() {
                     <option value="">选择版本 {slot + 1}</option>
                     {historyRecords.slice(0, 30).map((record) => (
                       <option key={record.id} value={record.id}>
-                        {record.title} / {new Date(record.createdAt).toLocaleString("zh-CN")}
+                        {record.title} / {new Date(record.createdAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}
                       </option>
                     ))}
                   </select>

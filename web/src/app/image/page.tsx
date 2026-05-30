@@ -92,6 +92,7 @@ function formatConversationTime(value: string) {
     return "";
   }
   return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
@@ -143,13 +144,47 @@ function buildReferenceImageFromResult(image: StoredImage, fileName: string): St
   };
 }
 
-async function fetchImageAsFile(url: string, fileName: string) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error("读取结果图失败");
+function imageFetchCandidates(url: string) {
+  const normalized = String(url || "").trim();
+  if (!normalized) return [];
+  const candidates: string[] = [];
+  const add = (value: string) => {
+    if (value && !candidates.includes(value)) {
+      candidates.push(value);
+    }
+  };
+  add(normalized);
+  const imagePathIndex = normalized.indexOf("/images/");
+  if (imagePathIndex >= 0) {
+    add(normalized.slice(imagePathIndex));
   }
-  const blob = await response.blob();
-  return new File([blob], fileName, { type: blob.type || "image/png" });
+  try {
+    const parsed = new URL(normalized, window.location.origin);
+    if (parsed.pathname.startsWith("/images/")) {
+      add(`${parsed.pathname}${parsed.search}`);
+    }
+  } catch {
+    // Keep original candidate only.
+  }
+  return candidates;
+}
+
+async function fetchImageAsFile(url: string, fileName: string) {
+  let lastError: unknown = null;
+  for (const candidate of imageFetchCandidates(url)) {
+    try {
+      const response = await fetch(candidate, { credentials: "same-origin" });
+      if (!response.ok) {
+        lastError = new Error(`HTTP ${response.status}`);
+        continue;
+      }
+      const blob = await response.blob();
+      return new File([blob], fileName, { type: blob.type || "image/png" });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(lastError instanceof Error ? `读取结果图失败：${lastError.message}` : "读取结果图失败");
 }
 
 async function buildReferenceImageFromStoredImage(image: StoredImage, fileName: string) {
@@ -191,7 +226,7 @@ function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage
       taskId: task.id,
       status: "success",
       b64_json: first.b64_json,
-      url: first.url,
+      url: first.local_url || first.url,
       revised_prompt: first.revised_prompt,
       error: undefined,
     };
@@ -1124,6 +1159,24 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     [],
   );
 
+  const handleRegionEditReference = useCallback(
+    (conversationId: string, referenceImage: StoredReferenceImage, instruction: string) => {
+      setSelectedConversationId(conversationId);
+      setReferenceImages((prev) => [...prev, referenceImage]);
+      setReferenceImageFiles((prev) => [
+        ...prev,
+        dataUrlToFile(referenceImage.dataUrl, referenceImage.name, referenceImage.type),
+      ]);
+      setImagePrompt((current) => {
+        const trimmed = current.trim();
+        return trimmed ? `${trimmed}\n\n${instruction}` : instruction;
+      });
+      textareaRef.current?.focus();
+      toast.success("已加入局部重绘参考图，可继续补充修改要求");
+    },
+    [],
+  );
+
   // 单图发布到画廊的状态机：image.id → state。
   // 用 Map<string, ImagePublishState> 而不是数组，O(1) 查询；
   // 不持久化到 localforage，刷新页面回落"未发布"——是否发过让"画廊"页自己说了算，
@@ -1848,6 +1901,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                 onRegenerateTurn={handleRegenerateTurn}
                 onRetryImage={handleRetryImage}
                 onReplyToTurn={handleReplyToTurn}
+                onRegionEditReference={handleRegionEditReference}
                 onPublishImage={handlePublishImage}
                 publishStateOf={publishStateOf}
                 formatConversationTime={formatConversationTime}

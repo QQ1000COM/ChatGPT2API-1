@@ -5,6 +5,7 @@ import {
   AlertCircle,
   Check,
   Clock3,
+  Crosshair,
   Download,
   Info,
   LoaderCircle,
@@ -47,6 +48,7 @@ type ImageResultsProps = {
   onRegenerateTurn: (conversationId: string, turnId: string) => void | Promise<void>;
   onRetryImage: (conversationId: string, turnId: string, imageId: string) => void | Promise<void>;
   onReplyToTurn?: (conversationId: string, turnId: string, aiMessage: string) => void;
+  onRegionEditReference?: (conversationId: string, referenceImage: StoredReferenceImage, instruction: string) => void;
   /**
    * 单图发布到画廊。turnId + image 一起传，让父组件能拿到 turn.prompt / model / size
    * 拼成 publish 请求体。父组件用 publishState 反推每张图的状态显示。
@@ -61,7 +63,58 @@ function getStoredImageSrc(image: StoredImage) {
   if (image.b64_json) {
     return `data:image/png;base64,${image.b64_json}`;
   }
-  return image.url || "";
+  const url = image.url || "";
+  const imagePathIndex = url.indexOf("/images/");
+  return imagePathIndex >= 0 ? url.slice(imagePathIndex) : url;
+}
+
+type RegionSelection = { x: number; y: number; width: number; height: number };
+type RegionEditState = { conversationId: string; image: StoredImage; src: string } | null;
+
+function normalizeRegionSelection(selection: RegionSelection): RegionSelection | null {
+  const x = Math.min(selection.x, selection.x + selection.width);
+  const y = Math.min(selection.y, selection.y + selection.height);
+  const width = Math.abs(selection.width);
+  const height = Math.abs(selection.height);
+  if (width < 0.02 || height < 0.02) {
+    return null;
+  }
+  return { x, y, width, height };
+}
+
+function loadImageElement(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("图片加载失败"));
+    image.src = src;
+  });
+}
+
+async function buildRegionReference(src: string, selection: RegionSelection) {
+  const image = await loadImageElement(src);
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth || image.width;
+  canvas.height = image.naturalHeight || image.height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("浏览器不支持画布");
+  }
+  ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+  const x = selection.x * canvas.width;
+  const y = selection.y * canvas.height;
+  const width = selection.width * canvas.width;
+  const height = selection.height * canvas.height;
+  ctx.save();
+  ctx.fillStyle = "rgba(244, 63, 94, 0.12)";
+  ctx.strokeStyle = "rgba(244, 63, 94, 0.95)";
+  ctx.lineWidth = Math.max(6, Math.round(Math.min(canvas.width, canvas.height) * 0.01));
+  ctx.setLineDash([ctx.lineWidth * 2, ctx.lineWidth]);
+  ctx.fillRect(x, y, width, height);
+  ctx.strokeRect(x, y, width, height);
+  ctx.restore();
+  return canvas.toDataURL("image/png");
 }
 
 // 单独识别"额度不足"这一类错误。这种错误不应该让用户去点"重试"或者"回复"——
@@ -70,6 +123,20 @@ function getStoredImageSrc(image: StoredImage) {
 function isQuotaError(message: string | undefined | null) {
   if (!message) return false;
   return message.includes("额度不足");
+}
+
+function getUserFacingImageError(message: string | undefined | null) {
+  const detail = String(message || "").trim();
+  if (!detail) {
+    return "生成失败，请联系管理员检查账号、额度或上游服务状态。";
+  }
+  if (detail.includes("额度不足")) {
+    return `${detail}，请联系管理员追加额度后再试。`;
+  }
+  if (detail.startsWith("生成失败")) {
+    return detail.includes("管理员") ? detail : `${detail}，请联系管理员解决。`;
+  }
+  return `生成失败：${detail}。请联系管理员检查账号、额度或上游服务状态。`;
 }
 
 async function downloadStoredImage(image: StoredImage, index: number) {
@@ -186,11 +253,16 @@ export function ImageResults({
   onRegenerateTurn,
   onRetryImage,
   onReplyToTurn,
+  onRegionEditReference,
   onPublishImage,
   publishStateOf,
   formatConversationTime,
 }: ImageResultsProps) {
   const [imageDimensions, setImageDimensions] = useState<Record<string, string>>({});
+  const [expandedPrompts, setExpandedPrompts] = useState<Record<string, boolean>>({});
+  const [regionEdit, setRegionEdit] = useState<RegionEditState>(null);
+  const [regionSelection, setRegionSelection] = useState<RegionSelection | null>(null);
+  const [regionDragStart, setRegionDragStart] = useState<{ x: number; y: number } | null>(null);
 
   const updateImageDimensions = (id: string, width: number, height: number) => {
     const dimensions = formatImageDimensions(width, height);
@@ -200,6 +272,47 @@ export function ImageResults({
       }
       return { ...current, [id]: dimensions };
     });
+  };
+
+  const startRegionEdit = (conversationId: string, image: StoredImage, src: string) => {
+    setRegionEdit({ conversationId, image, src });
+    setRegionSelection(null);
+    setRegionDragStart(null);
+  };
+
+  const confirmRegionEdit = async () => {
+    const normalized = regionSelection ? normalizeRegionSelection(regionSelection) : null;
+    if (!regionEdit || !normalized || !onRegionEditReference) {
+      return;
+    }
+    const instruction =
+      "局部重绘：只修改红色框选区域，保持框外产品主体、构图、颜色、比例和背景不变；修改后自然融合，不要改变未圈选区域。";
+    try {
+      const dataUrl = await buildRegionReference(regionEdit.src, normalized);
+      onRegionEditReference(
+        regionEdit.conversationId,
+        {
+          name: `region-edit-${regionEdit.image.id}.png`,
+          type: "image/png",
+          dataUrl,
+        },
+        instruction,
+      );
+    } catch {
+      onRegionEditReference(
+        regionEdit.conversationId,
+        {
+          name: `region-edit-${regionEdit.image.id}.png`,
+          type: "image/png",
+          dataUrl: regionEdit.src,
+        },
+        instruction,
+      );
+    } finally {
+      setRegionEdit(null);
+      setRegionSelection(null);
+      setRegionDragStart(null);
+    }
   };
 
   if (!selectedConversation) {
@@ -327,12 +440,17 @@ export function ImageResults({
   );
 
   return (
+    <>
     <div className="mx-auto flex w-full max-w-[980px] flex-col gap-5 sm:gap-8">
       {selectedConversation.turns.map((turn, turnIndex) => {
         const referenceLightboxImages = turn.referenceImages.map((image, index) => ({
           id: `${turn.id}-reference-${index}`,
           src: image.dataUrl,
         }));
+        const isPromptExpanded = expandedPrompts[turn.id] === true;
+        const shouldFoldPrompt = turn.prompt.length > 120 || turn.prompt.includes("\n");
+        const visiblePrompt =
+          shouldFoldPrompt && !isPromptExpanded ? `${turn.prompt.slice(0, 120).trimEnd()}...` : turn.prompt;
 
         return (
           <div key={turn.id} className="flex flex-col gap-3 sm:gap-4">
@@ -347,7 +465,16 @@ export function ImageResults({
                     <span>{getTurnStatusLabel(turn.status)}</span>
                     <span>{formatConversationTime(turn.createdAt)}</span>
                   </div>
-                  <div className="text-right">{turn.prompt}</div>
+                  <div className="whitespace-pre-wrap text-right">{visiblePrompt}</div>
+                  {shouldFoldPrompt ? (
+                    <button
+                      type="button"
+                      onClick={() => setExpandedPrompts((current) => ({ ...current, [turn.id]: !isPromptExpanded }))}
+                      className="mt-1 text-[11px] font-medium text-stone-400 transition hover:text-stone-700"
+                    >
+                      {isPromptExpanded ? "收起提示词" : "展开提示词"}
+                    </button>
+                  ) : null}
                   <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5">
                     <button
                       type="button"
@@ -410,7 +537,7 @@ export function ImageResults({
                     {turn.status === "queued" ? (
                       <span className="inline-flex items-center gap-1 rounded-full bg-stone-100 px-3 py-1 text-stone-500">
                         <Clock3 className="size-3 text-stone-400" />
-                        等待前序任务完成
+                        排队中：等待前面的任务完成
                       </span>
                     ) : null}
                   </div>
@@ -455,7 +582,7 @@ export function ImageResults({
                                 <span>结果 {index + 1}</span>
                                 {imageMeta ? <span className="ml-2">{imageMeta}</span> : null}
                               </div>
-                              <div className="flex shrink-0 items-center gap-1.5">
+                              <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
                                 <button
                                   type="button"
                                   onClick={() => onContinueEdit(selectedConversation.id, image)}
@@ -465,6 +592,17 @@ export function ImageResults({
                                 >
                                   <Sparkles className="size-3.5" />
                                 </button>
+                                {onRegionEditReference ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => startRegionEdit(selectedConversation.id, image, imageSrc)}
+                                    className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-stone-100 text-stone-600 transition hover:bg-stone-200 hover:text-stone-900"
+                                    aria-label="局部重绘"
+                                    title="局部重绘"
+                                  >
+                                    <Crosshair className="size-3.5" />
+                                  </button>
+                                ) : null}
                                 <button
                                   type="button"
                                   onClick={() => void downloadStoredImage(image, index)}
@@ -535,10 +673,11 @@ export function ImageResults({
                       }
 
                       if (image.status === "error") {
-                        const errorMessage = image.error || "生成失败";
+                        const rawErrorMessage = image.error || "";
+                        const errorMessage = getUserFacingImageError(rawErrorMessage);
                         // 额度不足是"配额"问题不是"模型反问"，重试/回复都没有意义，
                         // 单独走一张安静的提示卡，引导用户联系管理员。
-                        if (isQuotaError(errorMessage)) {
+                        if (isQuotaError(rawErrorMessage)) {
                           return (
                             <div
                               key={image.id}
@@ -588,11 +727,11 @@ export function ImageResults({
                                   <RotateCcw className="size-3" />
                                   重试
                                 </button>
-                                {onReplyToTurn && image.error ? (
+                                {onReplyToTurn && rawErrorMessage ? (
                                   <div className="relative inline-flex items-center gap-1">
                                     <button
                                       type="button"
-                                      onClick={() => onReplyToTurn(selectedConversation.id, turn.id, image.error || "")}
+                                      onClick={() => onReplyToTurn(selectedConversation.id, turn.id, rawErrorMessage)}
                                       className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-stone-700 ring-1 ring-stone-200 transition hover:bg-stone-100 hover:text-stone-900 sm:px-3 sm:text-xs"
                                       aria-label="基于该提问继续回复"
                                     >
@@ -639,13 +778,13 @@ export function ImageResults({
                               <span className="inline-flex size-7 items-center justify-center rounded-full bg-white text-stone-400 shadow-sm sm:size-8">
                                 <Clock3 className="size-3.5 sm:size-4" />
                               </span>
-                              <p className="text-[11px] leading-4 text-stone-500 sm:text-[13px]">排队中</p>
+                              <p className="text-[11px] leading-4 text-stone-500 sm:text-[13px]">排队中，等待提交</p>
                             </div>
                           ) : (
                             <>
                               <div aria-hidden className="dot-grid-loader absolute inset-0" />
                               <div className="absolute top-2 left-3 text-[11px] font-medium text-stone-500 sm:top-3 sm:left-4 sm:text-xs">
-                                正在创建图片
+                                生成中，完成后自动保存
                               </div>
                             </>
                           )}
@@ -657,7 +796,7 @@ export function ImageResults({
                   {turn.status === "error" && turn.error && !isQuotaError(turn.error) ? (
                     <div className="mt-3 inline-flex items-center gap-2 rounded-full bg-stone-100 px-3 py-1 text-[11px] text-stone-500 sm:mt-4 sm:text-xs">
                       <AlertCircle className="size-3 text-stone-400" />
-                      <span>{turn.error}</span>
+                      <span>{getUserFacingImageError(turn.error)}</span>
                     </div>
                   ) : null}
 
@@ -688,6 +827,86 @@ export function ImageResults({
         );
       })}
     </div>
+    {regionEdit ? (
+      <div className="fixed inset-0 z-[90] flex items-center justify-center bg-stone-950/55 px-3 py-4 backdrop-blur-sm">
+        <div className="flex max-h-[92dvh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+          <div className="flex items-center justify-between gap-3 border-b border-stone-100 px-4 py-3">
+            <div>
+              <div className="text-sm font-semibold text-stone-900">局部重绘圈选</div>
+              <div className="mt-0.5 text-xs text-stone-500">拖动框选要修改的区域，框外会要求模型保持不变。</div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setRegionEdit(null);
+                setRegionSelection(null);
+                setRegionDragStart(null);
+              }}
+              className="rounded-full px-3 py-1.5 text-xs font-medium text-stone-500 transition hover:bg-stone-100 hover:text-stone-900"
+            >
+              取消
+            </button>
+          </div>
+          <div className="min-h-0 flex-1 overflow-auto bg-stone-100 p-3 sm:p-5">
+            <div
+              className="relative mx-auto w-fit max-w-full touch-none overflow-hidden rounded-xl bg-white shadow-sm"
+              onPointerDown={(event) => {
+                const rect = event.currentTarget.getBoundingClientRect();
+                const x = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+                const y = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+                setRegionDragStart({ x, y });
+                setRegionSelection({ x, y, width: 0, height: 0 });
+                event.currentTarget.setPointerCapture(event.pointerId);
+              }}
+              onPointerMove={(event) => {
+                if (!regionDragStart) return;
+                const rect = event.currentTarget.getBoundingClientRect();
+                const x = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+                const y = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+                setRegionSelection({
+                  x: regionDragStart.x,
+                  y: regionDragStart.y,
+                  width: x - regionDragStart.x,
+                  height: y - regionDragStart.y,
+                });
+              }}
+              onPointerUp={() => setRegionDragStart(null)}
+              onPointerCancel={() => setRegionDragStart(null)}
+            >
+              <img src={regionEdit.src} alt="局部重绘参考图" className="block max-h-[70dvh] max-w-full select-none object-contain" draggable={false} />
+              {regionSelection ? (() => {
+                const normalized = normalizeRegionSelection(regionSelection);
+                if (!normalized) return null;
+                return (
+                  <div
+                    className="pointer-events-none absolute border-2 border-rose-500 bg-rose-500/10 shadow-[0_0_0_9999px_rgba(15,23,42,0.18)]"
+                    style={{
+                      left: `${normalized.x * 100}%`,
+                      top: `${normalized.y * 100}%`,
+                      width: `${normalized.width * 100}%`,
+                      height: `${normalized.height * 100}%`,
+                    }}
+                  />
+                );
+              })() : null}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-stone-100 px-4 py-3">
+            <div className="text-xs text-stone-500">确认后会把带红框的图片加入编辑，并自动补上“只改圈选区域”的提示词。</div>
+            <button
+              type="button"
+              onClick={() => void confirmRegionEdit()}
+              disabled={!normalizeRegionSelection(regionSelection || { x: 0, y: 0, width: 0, height: 0 })}
+              className="inline-flex h-9 items-center gap-1.5 rounded-full bg-stone-900 px-4 text-sm font-semibold text-white transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:bg-stone-200 disabled:text-stone-400"
+            >
+              <Crosshair className="size-4" />
+              加入局部重绘
+            </button>
+          </div>
+        </div>
+      </div>
+    ) : null}
+    </>
   );
 }
 
@@ -696,12 +915,12 @@ function getTurnStatusLabel(status: ImageTurnStatus) {
     return "排队中";
   }
   if (status === "generating") {
-    return "处理中";
+    return "生成中";
   }
   if (status === "success") {
     return "已完成";
   }
-  return "失败";
+  return "生成失败";
 }
 
 function formatBase64ImageSize(base64: string) {

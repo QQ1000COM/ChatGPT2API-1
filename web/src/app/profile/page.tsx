@@ -145,7 +145,7 @@ export default function ProfilePage() {
   const formatBoundAt = (value: string | null | undefined) => {
     if (!value) return "";
     try {
-      return new Date(value).toLocaleString();
+      return new Date(value).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
     } catch {
       return value;
     }

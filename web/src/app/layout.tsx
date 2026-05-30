@@ -7,6 +7,8 @@ import { TitleSync } from "@/components/title-sync";
 import { AnnouncementBanner } from "@/components/announcement-banner";
 import { TopNav } from "@/components/top-nav";
 
+const appVersion = process.env.NEXT_PUBLIC_APP_VERSION || "0.0.0";
+
 export const metadata: Metadata = {
   title: "QQ1000 AI",
   description: "QQ1000 AI 电商图片生成工作台",
@@ -42,6 +44,9 @@ export default function RootLayout({
           <div className="mx-auto box-border flex max-w-[1440px] flex-col pt-[env(safe-area-inset-top)]">
             <AnnouncementBanner />
             <PageTransition>{children}</PageTransition>
+            <footer className="pb-3 pt-6 text-center text-[11px] text-stone-400">
+              版本 {appVersion}
+            </footer>
           </div>
         </main>
       </body>

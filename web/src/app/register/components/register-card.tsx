@@ -274,7 +274,7 @@ export function RegisterCard() {
                     !item.level || item.level === "info" ? "text-white/80" : "",
                   )}
                 >
-                  <span className="shrink-0 text-white/30">{new Date(item.time).toLocaleTimeString()}</span>
+                  <span className="shrink-0 text-white/30">{new Date(item.time).toLocaleTimeString("zh-CN", { timeZone: "Asia/Shanghai" })}</span>
                   <span className="min-w-0 break-words">{item.text}</span>
                 </div>
               ))
