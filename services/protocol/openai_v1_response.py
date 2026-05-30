@@ -100,6 +100,79 @@ def _part_text(part: dict[str, Any]) -> str:
     return ""
 
 
+def _decode_data_url(value: str) -> tuple[bytes, str] | None:
+    url = str(value or "").strip()
+    if not url.startswith("data:") or "," not in url:
+        return None
+    header, _, data = url.partition(",")
+    mime = header.split(";", 1)[0].removeprefix("data:").strip() or "image/png"
+    try:
+        return base64.b64decode(data), mime
+    except Exception:
+        return None
+
+
+def _image_part_from_response_part(part: dict[str, Any]) -> dict[str, Any] | None:
+    part_type = str(part.get("type") or "").strip()
+    if part_type not in {"input_image", "image_url", "image"}:
+        return None
+    data = part.get("data")
+    if isinstance(data, (bytes, bytearray)):
+        return {"type": "image", "data": bytes(data), "mime": str(part.get("mime") or "image/png")}
+
+    image_url = part.get("image_url") or part.get("url")
+    if isinstance(image_url, dict):
+        image_url = image_url.get("url")
+    decoded = _decode_data_url(str(image_url or ""))
+    if decoded:
+        image_data, mime = decoded
+        return {"type": "image", "data": image_data, "mime": mime}
+
+    b64_json = str(part.get("b64_json") or "").strip()
+    if b64_json:
+        try:
+            return {"type": "image", "data": base64.b64decode(b64_json), "mime": str(part.get("mime") or "image/png")}
+        except Exception:
+            return None
+    return None
+
+
+def _content_for_backend(content: object) -> object:
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return str(content or "").strip()
+    parts: list[dict[str, Any]] = []
+    text_parts: list[str] = []
+    for part in content:
+        if isinstance(part, str):
+            text_parts.append(part)
+            continue
+        if not isinstance(part, dict):
+            continue
+        image_part = _image_part_from_response_part(part)
+        if image_part:
+            if text_parts:
+                text = "\n".join(item for item in text_parts if item).strip()
+                if text:
+                    parts.append({"type": "text", "text": text})
+                text_parts = []
+            parts.append(image_part)
+            continue
+        text = _part_text(part)
+        if text and text != "[input_image]":
+            text_parts.append(text)
+    if text_parts:
+        text = "\n".join(item for item in text_parts if item).strip()
+        if text:
+            parts.append({"type": "text", "text": text})
+    if not parts:
+        return ""
+    if len(parts) == 1 and parts[0].get("type") == "text":
+        return str(parts[0].get("text") or "")
+    return parts
+
+
 def _content_text(content: object) -> str:
     if isinstance(content, str):
         return content.strip()
@@ -157,11 +230,32 @@ def compact_messages_for_upstream(messages: list[dict[str, Any]]) -> list[dict[s
         if not isinstance(message, dict):
             continue
         role = str(message.get("role") or "user").strip() or "user"
-        content = _compact_text_for_upstream(str(message.get("content") or ""))
+        raw_content = message.get("content")
+        if isinstance(raw_content, list):
+            content_parts: list[dict[str, Any]] = []
+            for part in raw_content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "image":
+                    content_parts.append(part)
+                    continue
+                if part.get("type") == "text":
+                    text = _compact_text_for_upstream(str(part.get("text") or ""))
+                    if text:
+                        content_parts.append({"type": "text", "text": text})
+            content = content_parts
+        else:
+            content = _compact_text_for_upstream(str(raw_content or ""))
         if content:
             compacted.append({"role": role, "content": content})
 
-    total = sum(len(str(message.get("content") or "")) for message in compacted)
+    total = 0
+    for message in compacted:
+        content = message.get("content")
+        if isinstance(content, list):
+            total += sum(len(str(part.get("text") or "")) for part in content if isinstance(part, dict) and part.get("type") == "text")
+        else:
+            total += len(str(content or ""))
     if total <= CODEX_UPSTREAM_MAX_CHARS:
         return compacted
 
@@ -173,8 +267,26 @@ def compact_messages_for_upstream(messages: list[dict[str, Any]]) -> list[dict[s
     for index, message in enumerate(selected):
         remaining_items = max(1, len(selected) - index)
         per_message_limit = max(1200, budget // remaining_items)
-        content = _trim_middle(str(message.get("content") or ""), per_message_limit)
-        budget -= len(content)
+        raw_content = message.get("content")
+        if isinstance(raw_content, list):
+            content_parts = []
+            text_len = 0
+            for part in raw_content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "image":
+                    content_parts.append(part)
+                    continue
+                if part.get("type") == "text":
+                    text = _trim_middle(str(part.get("text") or ""), per_message_limit)
+                    if text:
+                        text_len += len(text)
+                        content_parts.append({"type": "text", "text": text})
+            content = content_parts
+            budget -= text_len
+        else:
+            content = _trim_middle(str(raw_content or ""), per_message_limit)
+            budget -= len(content)
         if content:
             result.append({"role": str(message.get("role") or "user"), "content": content})
     return result
@@ -184,15 +296,15 @@ def _message_from_response_item(item: dict[str, Any]) -> dict[str, Any] | None:
     item_type = str(item.get("type") or "").strip()
     if item_type == "message" or item.get("role"):
         role = str(item.get("role") or "user").strip() or "user"
-        text = _content_text(item.get("content"))
-        return {"role": role, "content": text} if text else None
+        content = _content_for_backend(item.get("content"))
+        return {"role": role, "content": content} if content else None
     if item_type == "function_call_output":
         return {"role": "user", "content": input_item_text(item)}
     if item_type == "function_call":
         return {"role": "assistant", "content": input_item_text(item)}
     if _is_response_content_part(item):
-        text = _part_text(item)
-        return {"role": "user", "content": text} if text else None
+        content = _content_for_backend([item])
+        return {"role": "user", "content": content} if content else None
     return None
 
 
@@ -272,9 +384,9 @@ def messages_from_input(input_value: object, instructions: object = None) -> lis
         return messages
     if isinstance(input_value, list):
         if all(isinstance(item, dict) and _is_response_content_part(item) for item in input_value):
-            text = _content_text(input_value)
-            if text:
-                messages.append({"role": "user", "content": text})
+            content = _content_for_backend(input_value)
+            if content:
+                messages.append({"role": "user", "content": content})
             return messages
         for item in input_value:
             if isinstance(item, dict):
@@ -294,6 +406,8 @@ def input_item_text(item: dict[str, Any]) -> str:
         return f"Tool output for call_id {call_id}:\n{output}"
     if item_type == "function_call":
         return f"Previous tool call {item.get('name')}: {item.get('arguments')}"
+    if item_type == "input_image":
+        return "[input_image attached]"
     if item_type and item_type not in {"message", "input_text", "output_text"}:
         return json.dumps(item, ensure_ascii=False)
     return extract_response_prompt([item]) or _content_text(item.get("content"))
@@ -323,9 +437,9 @@ def tool_messages_from_body(body: dict[str, Any]) -> tuple[str, list[dict[str, A
             messages.append(message)
     elif isinstance(input_value, list):
         if all(isinstance(item, dict) and _is_response_content_part(item) for item in input_value):
-            text = "\n\n".join(input_item_text(item) for item in input_value if isinstance(item, dict)).strip()
-            if text:
-                messages.append({"role": "user", "content": text})
+            content = _content_for_backend(input_value)
+            if content:
+                messages.append({"role": "user", "content": content})
         else:
             for item in input_value:
                 if not isinstance(item, dict):
