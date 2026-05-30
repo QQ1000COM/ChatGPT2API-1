@@ -47,7 +47,13 @@ CODEX_UPSTREAM_KEEP_LAST_MESSAGES = 8
 SHELL_TOOL_NAME_HINTS = ("shell", "exec", "command", "terminal", "powershell", "bash", "run")
 ACTION_REQUEST_RE = re.compile(
     r"(帮我|处理|修复|实现|新增|添加|升级|同步|部署|推送|测试|运行|查看|检查|改成|优化|继续|"
+    r"开始|执行|接着|搞定|完成|全部|直接|别问|不要问|不需要问|自动|"
     r"\bfix\b|\bimplement\b|\bupdate\b|\bdeploy\b|\bpush\b|\btest\b|\brun\b|\binspect\b|\bcheck\b)",
+    re.IGNORECASE,
+)
+CLARIFICATION_REQUEST_RE = re.compile(
+    r"(do you want|would you like|should i|which option|merge .* cherry-pick|cherry-pick .* merge|"
+    r"你想|是否要|要不要|需要你|请确认|选择|合并还是|还是.*挑选)",
     re.IGNORECASE,
 )
 FENCED_COMMAND_RE = re.compile(
@@ -428,7 +434,23 @@ def input_item_text(item: dict[str, Any]) -> str:
 
 def _tool_name(tool: dict[str, Any]) -> str:
     function = tool.get("function") if isinstance(tool.get("function"), dict) else {}
-    return str(tool.get("name") or function.get("name") or "").strip()
+    name = str(tool.get("name") or function.get("name") or "").strip()
+    if name:
+        return name
+    tool_type = str(tool.get("type") or "").strip()
+    return tool_type if tool_type and tool_type != "function" else ""
+
+
+def _tool_identity(tool: dict[str, Any]) -> str:
+    function = tool.get("function") if isinstance(tool.get("function"), dict) else {}
+    values = [
+        tool.get("type"),
+        tool.get("name"),
+        function.get("name"),
+        tool.get("description"),
+        function.get("description"),
+    ]
+    return " ".join(str(value or "") for value in values).strip().lower()
 
 
 def _tool_parameters(tool: dict[str, Any]) -> dict[str, Any]:
@@ -438,12 +460,16 @@ def _tool_parameters(tool: dict[str, Any]) -> dict[str, Any]:
 
 
 def _find_shell_tool(tools: list[dict[str, Any]]) -> dict[str, Any] | None:
-    named_tools = [(tool, _tool_name(tool).lower()) for tool in tools if isinstance(tool, dict)]
-    for tool, name in named_tools:
-        if name in {"shell", "shell_command", "exec_command", "run_command", "terminal"}:
+    named_tools = [(tool, _tool_name(tool).lower(), _tool_identity(tool)) for tool in tools if isinstance(tool, dict)]
+    for tool, name, identity in named_tools:
+        if name in {"shell", "shell_command", "exec_command", "run_command", "terminal", "local_shell"}:
             return tool
-    for tool, name in named_tools:
-        if any(hint in name for hint in SHELL_TOOL_NAME_HINTS):
+        if str(tool.get("type") or "").strip() in {"local_shell", "shell"}:
+            return tool
+        if "local_shell" in identity:
+            return tool
+    for tool, name, identity in named_tools:
+        if any(hint in name or hint in identity for hint in SHELL_TOOL_NAME_HINTS):
             return tool
     return None
 
@@ -505,6 +531,31 @@ def _latest_user_text(messages: list[dict[str, Any]] | None) -> str:
     return ""
 
 
+def _user_texts(messages: list[dict[str, Any]] | None) -> list[str]:
+    if not messages:
+        return []
+    texts: list[str] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("role") or "").strip() != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict):
+                    parts.append(str(part.get("text") or ""))
+                elif isinstance(part, str):
+                    parts.append(part)
+            text = "\n".join(part for part in parts if part).strip()
+        else:
+            text = str(content or "").strip()
+        if text:
+            texts.append(text)
+    return texts
+
+
 def _has_tool_output(messages: list[dict[str, Any]] | None) -> bool:
     if not messages:
         return False
@@ -513,6 +564,14 @@ def _has_tool_output(messages: list[dict[str, Any]] | None) -> bool:
         and "Tool output for call_id" in str(message.get("content") or "")
         for message in messages
     )
+
+
+def _is_kickoff_text(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    kickoff_words = ("开始", "开始吧", "继续", "继续执行", "接着", "直接执行", "直接开始", "别问", "不要问", "不需要问")
+    return any(value == word or value.startswith(f"{word}，") or value.startswith(f"{word},") or value.startswith(f"{word} ") for word in kickoff_words)
 
 
 def _fallback_tool_call_from_text(text: str, tools: list[dict[str, Any]], messages: list[dict[str, Any]] | None) -> dict[str, Any] | None:
@@ -527,13 +586,51 @@ def _fallback_tool_call_from_text(text: str, tools: list[dict[str, Any]], messag
             "arguments": _tool_argument_for_command(shell_tool, command),
         }
     latest_user = _latest_user_text(messages)
-    if latest_user and ACTION_REQUEST_RE.search(latest_user) and not _has_tool_output(messages):
+    user_text = "\n".join(_user_texts(messages))
+    asks_for_confirmation = CLARIFICATION_REQUEST_RE.search(text) is not None
+    should_start = bool(latest_user and ACTION_REQUEST_RE.search(latest_user))
+    should_recover_from_question = bool(asks_for_confirmation and ACTION_REQUEST_RE.search(user_text))
+    if should_start and (not _has_tool_output(messages) or latest_user.strip() in {"开始", "继续", "继续执行", "接着", "直接执行"}):
         return {
             "type": "function_call",
             "name": _tool_name(shell_tool),
-            "arguments": _tool_argument_for_command(shell_tool, "git status --short"),
+            "arguments": _tool_argument_for_command(shell_tool, _initial_codex_command(user_text or latest_user)),
+        }
+    if should_recover_from_question:
+        return {
+            "type": "function_call",
+            "name": _tool_name(shell_tool),
+            "arguments": _tool_argument_for_command(shell_tool, _initial_codex_command(user_text)),
         }
     return None
+
+
+def _initial_codex_command(task_text: str) -> str:
+    text = str(task_text or "").lower()
+    if any(keyword in text for keyword in ["upstream", "release", "github", "上游", "同步", "升级", "版本"]):
+        return "git status --short; git branch --show-current; git remote -v; git log --oneline --decorate --max-count=8"
+    if any(keyword in text for keyword in ["push", "推送", "提交", "commit"]):
+        return "git status --short; git branch --show-current; git log --oneline --decorate --max-count=5"
+    return "git status --short; git branch --show-current; rg --files | Select-Object -First 80"
+
+
+def _forced_initial_tool_call(tools: list[dict[str, Any]], messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    shell_tool = _find_shell_tool(tools)
+    if not shell_tool:
+        return None
+    latest_user = _latest_user_text(messages)
+    if not latest_user:
+        return None
+    user_text = "\n".join(_user_texts(messages))
+    if not _is_kickoff_text(latest_user):
+        return None
+    if _has_tool_output(messages) and not _is_kickoff_text(latest_user):
+        return None
+    return {
+        "type": "function_call",
+        "name": _tool_name(shell_tool),
+        "arguments": _tool_argument_for_command(shell_tool, _initial_codex_command(user_text or latest_user)),
+    }
 
 
 def tool_messages_from_body(body: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
@@ -912,6 +1009,37 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
     if is_function_tool_request(body):
         model, messages = tool_messages_from_body(body)
         key = cache_key(body, messages, stream=bool(body.get("stream")))
+        tools = response_function_tools(body)
+        forced_tool_call = _forced_initial_tool_call(tools, messages)
+        if forced_tool_call is not None:
+            if body.get("stream"):
+                response_id = f"resp_{uuid.uuid4().hex}"
+                created = int(time.time())
+                item = function_call_item(str(forced_tool_call.get("name") or ""), forced_tool_call.get("arguments") or {})
+                yield response_created(response_id, model, created)
+                yield {"type": "response.output_item.added", "output_index": 0, "item": {**item, "status": "in_progress", "arguments": ""}}
+                yield {"type": "response.function_call_arguments.delta", "item_id": item["id"], "output_index": 0, "delta": item["arguments"]}
+                yield {"type": "response.function_call_arguments.done", "item_id": item["id"], "output_index": 0, "arguments": item["arguments"]}
+                yield {"type": "response.output_item.done", "output_index": 0, "item": item}
+                usage = token_usage(
+                    input_text_tokens=count_message_text_tokens(messages, model),
+                    output_text_tokens=count_text_tokens(item["arguments"], model),
+                )
+                yield response_completed(response_id, model, created, [item], usage)
+                return
+            item = function_call_item(str(forced_tool_call.get("name") or ""), forced_tool_call.get("arguments") or {})
+            usage = token_usage(
+                input_text_tokens=count_message_text_tokens(messages, model),
+                output_text_tokens=count_text_tokens(item["arguments"], model),
+            )
+            yield response_completed(
+                f"resp_{uuid.uuid4().hex}",
+                model,
+                int(time.time()),
+                [item],
+                usage,
+            )
+            return
         yield from chat_completion_cache.get_or_compute_stream(
             key,
             lambda: stream_tool_response(text_backend(), body, messages),

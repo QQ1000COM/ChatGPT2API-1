@@ -139,13 +139,13 @@ def _record_usage(identity: dict[str, object], endpoint: str, *, input_tokens: i
 def _requires_code_permission(tools: object) -> bool:
     if not isinstance(tools, list):
         return False
-    code_tool_names = {"read_file", "search_code", "apply_patch", "run_tests", "edit_file"}
+    code_tool_names = {"read_file", "search_code", "apply_patch", "run_tests", "edit_file", "shell", "shell_command", "exec_command", "run_command", "terminal", "local_shell"}
     for tool in tools:
         if not isinstance(tool, dict):
             continue
         function = tool.get("function")
         function_name = function.get("name") if isinstance(function, dict) else ""
-        name = str(tool.get("name") or function_name or "").strip()
+        name = str(tool.get("name") or function_name or tool.get("type") or "").strip()
         if name in code_tool_names:
             return True
     return False

@@ -94,16 +94,15 @@ def test_responses_codex_command_block_becomes_shell_call(monkeypatch):
 
 
 def test_responses_codex_action_request_gets_initial_shell_call(monkeypatch):
-    monkeypatch.setattr(
-        openai_v1_response,
-        "stream_text_deltas",
-        lambda backend, request: iter(["我先查看仓库状态，然后再修改代码。"]),
-    )
+    def fail_if_called(_backend, _request):
+        raise AssertionError("stream_text_deltas should not run before the initial shell call")
+
+    monkeypatch.setattr(openai_v1_response, "stream_text_deltas", fail_if_called)
     monkeypatch.setattr(openai_v1_response, "text_backend", lambda: object())
 
     response = openai_v1_response.handle({
         "model": "gpt-5.1-codex",
-        "input": "这次帮我完全修复",
+        "input": "开始，先查看仓库状态，然后再修改代码。",
         "tools": [{
             "type": "function",
             "function": {
@@ -121,7 +120,30 @@ def test_responses_codex_action_request_gets_initial_shell_call(monkeypatch):
     item = response["output"][0]
     assert item["type"] == "function_call"
     assert item["name"] == "exec_command"
-    assert '"cmd": "git status --short"' in item["arguments"]
+    assert '"cmd": "git status --short; git branch --show-current; rg --files | Select-Object -First 80"' in item["arguments"]
+
+
+def test_responses_codex_local_shell_tool_is_detected(monkeypatch):
+    def fail_if_called(_backend, _request):
+        raise AssertionError("stream_text_deltas should not run before the initial shell call")
+
+    monkeypatch.setattr(openai_v1_response, "stream_text_deltas", fail_if_called)
+    monkeypatch.setattr(openai_v1_response, "text_backend", lambda: object())
+
+    response = openai_v1_response.handle({
+        "model": "gpt-5.1-codex",
+        "input": "开始，先查看仓库状态，然后再修改代码。",
+        "tools": [{
+            "type": "local_shell",
+            "description": "Run a local shell command",
+        }],
+    })
+
+    assert isinstance(response, dict)
+    item = response["output"][0]
+    assert item["type"] == "function_call"
+    assert item["name"] == "local_shell"
+    assert '"command": "git status --short; git branch --show-current; rg --files | Select-Object -First 80"' in item["arguments"]
 
 
 def test_responses_codex_tool_output_followup_can_answer(monkeypatch):
