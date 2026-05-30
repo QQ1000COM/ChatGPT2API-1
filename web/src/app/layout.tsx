@@ -7,7 +7,7 @@ import { TitleSync } from "@/components/title-sync";
 import { AnnouncementBanner } from "@/components/announcement-banner";
 import { TopNav } from "@/components/top-nav";
 
-const appVersion = process.env.NEXT_PUBLIC_APP_VERSION || "0.0.0";
+const appVersion = (process.env.NEXT_PUBLIC_APP_VERSION || "0.0.0").trim();
 
 export const metadata: Metadata = {
   title: "QQ1000 AI",
