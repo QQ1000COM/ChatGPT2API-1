@@ -885,6 +885,15 @@ export async function fetchSystemLogs(filters: { type?: string; start_date?: str
   return httpRequest<{ items: SystemLog[] }>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);
 }
 
+export async function fetchMyCodexLogs(filters: { page?: number; page_size?: number; start_date?: string; end_date?: string }) {
+  const params = new URLSearchParams();
+  if (filters.page) params.set("page", String(filters.page));
+  if (filters.page_size) params.set("page_size", String(filters.page_size));
+  if (filters.start_date) params.set("start_date", filters.start_date);
+  if (filters.end_date) params.set("end_date", filters.end_date);
+  return httpRequest<{ items: SystemLog[]; total: number; page: number; page_size: number }>(`/api/me/codex-logs${params.toString() ? `?${params.toString()}` : ""}`);
+}
+
 export async function deleteSystemLogs(ids: string[]) {
   return httpRequest<{ removed: number }>("/api/logs/delete", {
     method: "POST",

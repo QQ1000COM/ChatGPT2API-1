@@ -101,18 +101,31 @@ def input_to_items(input_value: object) -> list[dict[str, Any]]:
     return []
 
 
+def instructions_to_items(instructions: object) -> list[dict[str, Any]]:
+    text = str(instructions or "").strip()
+    if not text:
+        return []
+    return [{
+        "id": "msg_instructions_0",
+        "type": "message",
+        "role": "system",
+        "content": [{"type": "input_text", "text": text}],
+    }]
+
+
 def store_response(
     identity: dict[str, object],
     response: dict[str, Any],
     input_value: object,
     previous_context_items: list[dict[str, Any]] | None = None,
+    instructions: object = None,
 ) -> None:
     response_id = str(response.get("id") or "").strip()
     if not response_id:
         return
     _prune()
     owner_id = _owner_id(identity)
-    input_items = input_to_items(input_value)
+    input_items = [*instructions_to_items(instructions), *input_to_items(input_value)]
     if not isinstance(previous_context_items, list):
         previous_context_items = []
     output_items = response.get("output")

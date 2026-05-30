@@ -1,12 +1,14 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { BarChart3, ChevronDown, Code2, Copy, DollarSign, Download, FileText, Folder, KeyRound, LoaderCircle, Maximize2, MessageCircle, RefreshCw } from "lucide-react";
+import { BarChart3, ChevronDown, ChevronLeft, ChevronRight, Code2, Copy, DollarSign, Download, Eye, FileText, Folder, KeyRound, LoaderCircle, Maximize2, MessageCircle, RefreshCw, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { ImageLightbox } from "@/components/image-lightbox";
+import { DateRangeFilter } from "@/components/date-range-filter";
 import { Button } from "@/components/ui/button";
-import { createQQBindUrl, downloadImages, fetchMyProfile, type MyProfile } from "@/lib/api";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { createQQBindUrl, deleteSystemLogs, downloadImages, fetchMyCodexLogs, fetchMyProfile, fetchSystemLogs, type MyProfile, type SystemLog } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 type ProfileImage = MyProfile["images"][number];
@@ -14,12 +16,12 @@ type ProfileEntry =
   | { type: "image"; id: string; item: ProfileImage }
   | { type: "folder"; id: string; title: string; count: number; items: ProfileImage[] };
 
-function detailText(item: NonNullable<MyProfile["codex_logs"]>[number], key: string) {
+function detailText(item: SystemLog, key: string) {
   const value = item.detail?.[key];
   return typeof value === "string" || typeof value === "number" ? String(value) : "-";
 }
 
-function detailNumber(item: NonNullable<MyProfile["codex_logs"]>[number], key: string) {
+function detailNumber(item: SystemLog, key: string) {
   const value = item.detail?.[key];
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim()) {
@@ -41,11 +43,60 @@ function compactUsd(value: number | null) {
   return `$${value.toFixed(5)}`;
 }
 
-function logStatus(item: NonNullable<MyProfile["codex_logs"]>[number]) {
+function logStatus(item: SystemLog) {
   const status = item.detail?.status;
   if (status === "failed") return "失败";
   if (status === "success") return "成功";
   return "-";
+}
+
+function codexPhaseLabel(value: unknown) {
+  const phase = String(value || "");
+  const labels: Record<string, string> = {
+    scan_repo: "扫描仓库",
+    locate_files: "定位文件",
+    edit_source: "修改源码",
+    run_tests: "运行测试",
+    tool_call: "工具调用",
+  };
+  return labels[phase] || phase || "-";
+}
+
+const detailLabels: Record<string, string> = {
+  key_id: "密钥 ID",
+  key_name: "密钥名称",
+  user_name: "调用用户",
+  role: "用户角色",
+  endpoint: "接口",
+  model: "模型",
+  started_at: "开始时间",
+  ended_at: "结束时间",
+  duration_ms: "耗时毫秒",
+  status: "状态",
+  tool_call_count: "工具调用次数",
+  codex_mode: "Codex 模式",
+  codex_phase: "执行阶段",
+  input_tokens: "输入 token",
+  output_tokens: "输出 token",
+  cached_input_tokens: "缓存输入 token",
+  reasoning_tokens: "思考 token",
+  total_tokens: "总 token",
+  estimated_cost_usd: "预估费用 USD",
+  request_text: "请求内容",
+  error: "错误信息",
+};
+
+function formatDetailValue(key: string, value: unknown) {
+  if (key === "status") {
+    if (value === "success") return "成功";
+    if (value === "failed") return "失败";
+  }
+  if (key === "codex_mode") return value ? "是" : "否";
+  if (key === "codex_phase") return codexPhaseLabel(value);
+  if (typeof value === "boolean") return value ? "是" : "否";
+  if (typeof value === "number" && key === "estimated_cost_usd") return `$${value.toFixed(6)}`;
+  if (typeof value === "string" || typeof value === "number") return String(value);
+  return JSON.stringify(value ?? "", null, 2);
 }
 
 function groupProfileImages(images: ProfileImage[]): ProfileEntry[] {
@@ -81,6 +132,247 @@ function groupProfileImages(images: ProfileImage[]): ProfileEntry[] {
   });
 }
 
+function LogDetailDialog({ log, open, onOpenChange }: { log: SystemLog | null; open: boolean; onOpenChange: (open: boolean) => void }) {
+  const entries = Object.entries(log?.detail || {}).filter(([, value]) => value !== undefined && value !== null && value !== "");
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="flex h-[min(86vh,820px)] w-[min(92vw,920px)] flex-col overflow-hidden rounded-2xl p-0">
+        <DialogHeader className="shrink-0 border-b border-border px-6 py-5">
+          <DialogTitle>任务详情</DialogTitle>
+        </DialogHeader>
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+          <div className="mb-4 rounded-xl border border-border bg-background p-4 text-sm">
+            <div className="grid gap-3 md:grid-cols-2">
+              <div>
+                <span className="text-muted-foreground">日志时间</span>
+                <div className="mt-1 font-medium text-foreground">{log?.time || "-"}</div>
+              </div>
+              <div>
+                <span className="text-muted-foreground">摘要</span>
+                <div className="mt-1 font-medium text-foreground">{log?.summary || "-"}</div>
+              </div>
+            </div>
+          </div>
+          <div className="grid gap-3 rounded-xl border border-border bg-background p-4 text-sm md:grid-cols-2">
+            {entries.map(([key, value]) => (
+              <div key={key} className={key === "request_text" || typeof value === "object" ? "md:col-span-2" : ""}>
+                <div className="text-xs text-muted-foreground">{detailLabels[key] || key}</div>
+                <div className="mt-1 whitespace-pre-wrap break-words font-medium leading-6 text-foreground">
+                  {formatDetailValue(key, value)}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function CodexLogsPanel({ initialItems }: { initialItems: SystemLog[] }) {
+  const [open, setOpen] = useState(false);
+  const [items, setItems] = useState<SystemLog[]>(initialItems);
+  const [total, setTotal] = useState(initialItems.length);
+  const [page, setPage] = useState(1);
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [detailLog, setDetailLog] = useState<SystemLog | null>(null);
+  const pageSize = 10;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const safePage = Math.min(page, pageCount);
+
+  const loadLogs = async (nextPage = page) => {
+    setLoading(true);
+    try {
+      const response = await fetchMyCodexLogs({ page: nextPage, page_size: pageSize, start_date: startDate, end_date: endDate });
+      setItems(response.items);
+      setTotal(response.total);
+      setPage(response.page);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "加载 Codex 日志失败");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    void loadLogs(1);
+  }, [open, startDate, endDate]);
+
+  return (
+    <section className="rounded-2xl border border-border bg-card shadow-sm">
+      <button type="button" className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left" onClick={() => setOpen((value) => !value)}>
+        <div>
+          <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+            <FileText className="size-4 text-muted-foreground" />
+            Codex 调用日志
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">默认收起，展开后查看 token、费用、执行阶段和任务详情。</div>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="rounded-full border border-border bg-background px-3 py-1 text-xs text-muted-foreground">{total} 条</span>
+          <ChevronDown className={`size-4 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`} />
+        </div>
+      </button>
+      {open ? (
+        <div className="border-t border-border px-4 pb-4 pt-3">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); setPage(1); }} />
+            <Button type="button" variant="outline" className="h-10 rounded-xl" onClick={() => { setStartDate(""); setEndDate(""); setPage(1); }}>清除日期</Button>
+            <Button type="button" className="h-10 rounded-xl" onClick={() => void loadLogs(1)} disabled={loading}>
+              {loading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
+              查询
+            </Button>
+          </div>
+          <div className="overflow-x-auto">
+            <div className="min-w-[1080px] overflow-hidden rounded-xl border border-border bg-background">
+              <div className="grid grid-cols-[150px_110px_150px_92px_repeat(6,minmax(82px,1fr))_90px] border-b border-border bg-muted/40 px-3 py-2 text-xs font-semibold text-muted-foreground">
+                <div>时间</div><div>用户</div><div>模型</div><div>阶段</div><div className="text-right">输入</div><div className="text-right">输出</div><div className="text-right">缓存</div><div className="text-right">思考</div><div className="text-right">总计</div><div className="text-right">费用</div><div className="text-right">状态</div>
+              </div>
+              {items.map((item) => (
+                <div key={item.id} className="grid grid-cols-[150px_110px_150px_92px_repeat(6,minmax(82px,1fr))_90px] items-center border-b border-border/70 px-3 py-2 text-xs last:border-b-0">
+                  <div className="whitespace-nowrap font-medium text-foreground">{item.time}</div>
+                  <div className="truncate text-muted-foreground">{detailText(item, "user_name")}</div>
+                  <div className="truncate font-medium text-foreground">{detailText(item, "model")}</div>
+                  <div className="truncate text-muted-foreground">{codexPhaseLabel(item.detail?.codex_phase)}</div>
+                  <div className="text-right tabular-nums text-muted-foreground">{compactToken(detailNumber(item, "input_tokens"))}</div>
+                  <div className="text-right tabular-nums text-muted-foreground">{compactToken(detailNumber(item, "output_tokens"))}</div>
+                  <div className="text-right tabular-nums text-muted-foreground">{compactToken(detailNumber(item, "cached_input_tokens"))}</div>
+                  <div className="text-right tabular-nums text-muted-foreground">{compactToken(detailNumber(item, "reasoning_tokens"))}</div>
+                  <div className="text-right font-semibold tabular-nums text-foreground">{compactToken(detailNumber(item, "total_tokens"))}</div>
+                  <div className="text-right font-semibold tabular-nums text-foreground">{compactUsd(detailNumber(item, "estimated_cost_usd"))}</div>
+                  <div className="flex justify-end gap-2">
+                    <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium ${item.detail?.status === "failed" ? "bg-red-50 text-red-600" : "bg-emerald-50 text-emerald-700"}`}>{logStatus(item)}</span>
+                    <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => setDetailLog(item)} title="查看详情"><Eye className="size-3.5" /></button>
+                  </div>
+                </div>
+              ))}
+              {!loading && items.length === 0 ? <div className="px-4 py-10 text-center text-sm text-muted-foreground">暂无 Codex 调用日志。</div> : null}
+            </div>
+          </div>
+          <div className="mt-3 flex items-center justify-end gap-2 text-sm text-muted-foreground">
+            <span>第 {safePage} / {pageCount} 页，共 {total} 条</span>
+            <Button variant="outline" size="icon" className="size-9 rounded-lg" disabled={safePage <= 1 || loading} onClick={() => void loadLogs(safePage - 1)}><ChevronLeft className="size-4" /></Button>
+            <Button variant="outline" size="icon" className="size-9 rounded-lg" disabled={safePage >= pageCount || loading} onClick={() => void loadLogs(safePage + 1)}><ChevronRight className="size-4" /></Button>
+          </div>
+        </div>
+      ) : null}
+      <LogDetailDialog log={detailLog} open={Boolean(detailLog)} onOpenChange={(value) => !value && setDetailLog(null)} />
+    </section>
+  );
+}
+
+function AccountLogsPanel({ isAdmin }: { isAdmin: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [items, setItems] = useState<SystemLog[]>([]);
+  const [page, setPage] = useState(1);
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [detailLog, setDetailLog] = useState<SystemLog | null>(null);
+  const pageSize = 10;
+  const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
+  const safePage = Math.min(page, pageCount);
+  const rows = items.slice((safePage - 1) * pageSize, safePage * pageSize);
+
+  const loadLogs = async () => {
+    if (!isAdmin) return;
+    setLoading(true);
+    try {
+      const response = await fetchSystemLogs({ type: "account", start_date: startDate, end_date: endDate });
+      setItems(response.items);
+      setPage(1);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "加载账号管理日志失败");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!open || !isAdmin) return;
+    void loadLogs();
+  }, [open, startDate, endDate, isAdmin]);
+
+  const removeLogs = async (ids: string[]) => {
+    if (!ids.length) return;
+    setDeleting(true);
+    try {
+      const response = await deleteSystemLogs(ids);
+      toast.success(`已删除 ${response.removed} 条日志`);
+      await loadLogs();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "删除日志失败");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  if (!isAdmin) return null;
+  return (
+    <section className="rounded-2xl border border-border bg-card shadow-sm">
+      <button type="button" className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left" onClick={() => setOpen((value) => !value)}>
+        <div>
+          <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+            <FileText className="size-4 text-muted-foreground" />
+            账号管理日志
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">仅管理员可见，默认收起，支持日期搜索、分页、查看详情和删除。</div>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="rounded-full border border-border bg-background px-3 py-1 text-xs text-muted-foreground">{items.length} 条</span>
+          <ChevronDown className={`size-4 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`} />
+        </div>
+      </button>
+      {open ? (
+        <div className="border-t border-border px-4 pb-4 pt-3">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); setPage(1); }} />
+            <Button type="button" variant="outline" className="h-10 rounded-xl" onClick={() => { setStartDate(""); setEndDate(""); setPage(1); }}>清除日期</Button>
+            <Button type="button" className="h-10 rounded-xl" onClick={() => void loadLogs()} disabled={loading}>{loading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}查询</Button>
+            <Button type="button" variant="outline" className="h-10 rounded-xl border-rose-200 text-rose-600 hover:bg-rose-50" disabled={items.length === 0 || deleting} onClick={() => void removeLogs(items.map((item) => item.id))}>
+              <Trash2 className="size-4" />
+              删除全部
+            </Button>
+          </div>
+          <div className="overflow-x-auto rounded-xl border border-border bg-background">
+            <table className="w-full min-w-[760px] text-sm">
+              <thead className="bg-muted/40 text-xs text-muted-foreground">
+                <tr><th className="px-3 py-2 text-left">时间</th><th className="px-3 py-2 text-left">类型</th><th className="px-3 py-2 text-left">摘要</th><th className="px-3 py-2 text-right">操作</th></tr>
+              </thead>
+              <tbody>
+                {rows.map((item) => (
+                  <tr key={item.id} className="border-t border-border/70">
+                    <td className="whitespace-nowrap px-3 py-2 font-medium">{item.time}</td>
+                    <td className="px-3 py-2 text-muted-foreground">账号管理</td>
+                    <td className="max-w-[420px] truncate px-3 py-2 text-muted-foreground">{item.summary || "-"}</td>
+                    <td className="px-3 py-2">
+                      <div className="flex justify-end gap-2">
+                        <Button type="button" variant="ghost" className="h-8 rounded-lg px-2 text-xs" onClick={() => setDetailLog(item)}><Eye className="size-3.5" />详情</Button>
+                        <Button type="button" variant="ghost" className="h-8 rounded-lg px-2 text-xs text-rose-600 hover:bg-rose-50" disabled={deleting} onClick={() => void removeLogs([item.id])}><Trash2 className="size-3.5" />删除</Button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {!loading && rows.length === 0 ? <div className="px-4 py-10 text-center text-sm text-muted-foreground">暂无账号管理日志。</div> : null}
+          </div>
+          <div className="mt-3 flex items-center justify-end gap-2 text-sm text-muted-foreground">
+            <span>第 {safePage} / {pageCount} 页，共 {items.length} 条</span>
+            <Button variant="outline" size="icon" className="size-9 rounded-lg" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}><ChevronLeft className="size-4" /></Button>
+            <Button variant="outline" size="icon" className="size-9 rounded-lg" disabled={safePage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}><ChevronRight className="size-4" /></Button>
+          </div>
+        </div>
+      ) : null}
+      <LogDetailDialog log={detailLog} open={Boolean(detailLog)} onOpenChange={(value) => !value && setDetailLog(null)} />
+    </section>
+  );
+}
+
 export default function ProfilePage() {
   const { isCheckingAuth, session } = useAuthGuard();
   const [data, setData] = useState<MyProfile | null>(null);
@@ -90,7 +382,6 @@ export default function ProfilePage() {
   const [lightboxImages, setLightboxImages] = useState<Array<{ id: string; src: string; sizeLabel?: string; dimensions?: string }>>([]);
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
-  const [codexLogsOpen, setCodexLogsOpen] = useState(false);
 
   const load = async () => {
     setIsLoading(true);
@@ -320,73 +611,8 @@ export default function ProfilePage() {
         </div>
       </section>
 
-      <section className="rounded-2xl border border-border bg-card shadow-sm">
-        <button
-          type="button"
-          className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
-          onClick={() => setCodexLogsOpen((value) => !value)}
-        >
-          <div>
-            <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
-              <FileText className="size-4 text-muted-foreground" />
-              最近20条调用记录 - Codex
-            </div>
-            <div className="mt-1 text-xs text-muted-foreground">
-              已收录 {codexLogs.length} 条，默认收起，展开后查看 token、费用和执行状态。
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="rounded-full border border-border bg-background px-3 py-1 text-xs text-muted-foreground">
-              {codexLogs.length} 条
-            </span>
-            <ChevronDown className={`size-4 text-muted-foreground transition-transform ${codexLogsOpen ? "rotate-180" : ""}`} />
-          </div>
-        </button>
-        {codexLogsOpen ? (
-          <div className="border-t border-border px-4 pb-4 pt-3">
-            {codexLogs.length > 0 ? (
-              <div className="overflow-x-auto">
-                <div className="min-w-[980px] overflow-hidden rounded-xl border border-border bg-background">
-                  <div className="grid grid-cols-[150px_110px_150px_repeat(6,minmax(86px,1fr))_80px] border-b border-border bg-muted/40 px-3 py-2 text-xs font-semibold text-muted-foreground">
-                    <div>时间</div>
-                    <div>用户</div>
-                    <div>模型</div>
-                    <div className="text-right">输入</div>
-                    <div className="text-right">输出</div>
-                    <div className="text-right">缓存</div>
-                    <div className="text-right">思考</div>
-                    <div className="text-right">总计</div>
-                    <div className="text-right">费用</div>
-                    <div className="text-right">状态</div>
-                  </div>
-                  {codexLogs.map((item) => (
-                    <div key={item.id} className="grid grid-cols-[150px_110px_150px_repeat(6,minmax(86px,1fr))_80px] items-center border-b border-border/70 px-3 py-2 text-xs last:border-b-0">
-                      <div className="whitespace-nowrap font-medium text-foreground">{item.time}</div>
-                      <div className="truncate text-muted-foreground">{detailText(item, "user_name")}</div>
-                      <div className="truncate font-medium text-foreground">{detailText(item, "model")}</div>
-                      <div className="text-right tabular-nums text-muted-foreground">{compactToken(detailNumber(item, "input_tokens"))}</div>
-                      <div className="text-right tabular-nums text-muted-foreground">{compactToken(detailNumber(item, "output_tokens"))}</div>
-                      <div className="text-right tabular-nums text-muted-foreground">{compactToken(detailNumber(item, "cached_input_tokens"))}</div>
-                      <div className="text-right tabular-nums text-muted-foreground">{compactToken(detailNumber(item, "reasoning_tokens"))}</div>
-                      <div className="text-right font-semibold tabular-nums text-foreground">{compactToken(detailNumber(item, "total_tokens"))}</div>
-                      <div className="text-right font-semibold tabular-nums text-foreground">{compactUsd(detailNumber(item, "estimated_cost_usd"))}</div>
-                      <div className="text-right">
-                        <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium ${item.detail?.status === "failed" ? "bg-red-50 text-red-600" : "bg-emerald-50 text-emerald-700"}`}>
-                          {logStatus(item)}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <div className="rounded-xl border border-dashed border-border bg-background p-4 text-sm text-muted-foreground">
-                暂无 Codex 调用记录。
-              </div>
-            )}
-          </div>
-        ) : null}
-      </section>
+      <CodexLogsPanel initialItems={codexLogs} />
+      <AccountLogsPanel isAdmin={profile?.role === "admin"} />
 
       <section className="rounded-2xl border border-border bg-card p-4 shadow-sm">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">

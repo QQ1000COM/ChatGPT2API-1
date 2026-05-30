@@ -487,6 +487,21 @@ def messages_from_input(input_value: object, instructions: object = None) -> lis
     return messages
 
 
+def reasoning_system_message(body: dict[str, Any]) -> dict[str, str] | None:
+    reasoning = body.get("reasoning") if isinstance(body.get("reasoning"), dict) else {}
+    effort = str(reasoning.get("effort") or body.get("reasoning_effort") or "").strip()
+    summary = str(reasoning.get("summary") or "").strip()
+    if not effort and not summary:
+        return None
+    parts = ["The API request enabled reasoning support."]
+    if effort:
+        parts.append(f"Use reasoning effort: {effort}.")
+    if summary:
+        parts.append(f"Reasoning summary preference: {summary}.")
+    parts.append("Think through the task internally, preserve full relevant context, and return only the useful final answer or tool call output.")
+    return {"role": "system", "content": " ".join(parts)}
+
+
 def input_item_text(item: dict[str, Any]) -> str:
     item_type = str(item.get("type") or "").strip()
     if item_type == "function_call_output":
@@ -1063,6 +1078,9 @@ def tool_messages_from_body(body: dict[str, Any]) -> tuple[str, list[dict[str, A
     messages: list[dict[str, Any]] = [{"role": "system", "content": tool_prompt}]
     if instructions:
         messages.append({"role": "system", "content": instructions})
+    reasoning_message = reasoning_system_message(body)
+    if reasoning_message:
+        messages.append(reasoning_message)
     messages.extend(previous_messages_from_body(body))
 
     input_value = body.get("input")
@@ -1261,6 +1279,12 @@ def text_response_parts(body: dict[str, Any]) -> tuple[str, list[dict[str, Any]]
         return tool_messages_from_body(body)
     model = str(body.get("model") or "auto").strip() or "auto"
     current_messages = messages_from_input(body.get("input"), body.get("instructions"))
+    reasoning_message = reasoning_system_message(body)
+    if reasoning_message:
+        if current_messages and current_messages[0].get("role") == "system":
+            current_messages = [current_messages[0], reasoning_message, *current_messages[1:]]
+        else:
+            current_messages = [reasoning_message, *current_messages]
     previous_messages = previous_messages_from_body(body)
     if current_messages and current_messages[0].get("role") == "system":
         messages = [current_messages[0], *previous_messages, *current_messages[1:]]

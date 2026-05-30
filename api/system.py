@@ -134,11 +134,11 @@ def _is_codex_call_log(item: dict[str, object]) -> bool:
     return bool(detail.get("codex_mode")) or "codex" in model or ("codex" in summary and endpoint == "/v1/responses")
 
 
-def _profile_codex_logs(identity: dict[str, object]) -> list[dict[str, object]]:
+def _profile_codex_log_items(identity: dict[str, object], start_date: str = "", end_date: str = "", limit: int = 500) -> list[dict[str, object]]:
     identity_id = str(identity.get("id") or "").strip()
     is_admin = str(identity.get("role") or "") == "admin" or identity_id == "admin"
     rows: list[dict[str, object]] = []
-    for item in log_service.list(type="call", limit=200):
+    for item in log_service.list(type="call", start_date=start_date, end_date=end_date, limit=max(20, limit)):
         if not _is_codex_call_log(item):
             continue
         detail = item.get("detail") if isinstance(item.get("detail"), dict) else {}
@@ -149,9 +149,13 @@ def _profile_codex_logs(identity: dict[str, object]) -> list[dict[str, object]]:
             if key_id != identity_id and user_name != identity_name:
                 continue
         rows.append(item)
-        if len(rows) >= 20:
+        if len(rows) >= limit:
             break
     return rows
+
+
+def _profile_codex_logs(identity: dict[str, object]) -> list[dict[str, object]]:
+    return _profile_codex_log_items(identity, limit=20)
 
 
 def _qq_callback_url(request: Request) -> str:
@@ -376,6 +380,32 @@ def create_router(app_version: str) -> APIRouter:
             "api_usage": _api_usage_summary(profile),
             "api_pricing": OPENAI_API_PRICING,
             "codex_logs": _profile_codex_logs(identity),
+        }
+
+    @router.get("/api/me/codex-logs")
+    async def get_my_codex_logs(
+            page: int = 1,
+            page_size: int = 10,
+            start_date: str = "",
+            end_date: str = "",
+            authorization: str | None = Header(default=None),
+    ):
+        identity = require_identity(authorization)
+        safe_page = max(1, int(page or 1))
+        safe_page_size = min(50, max(1, int(page_size or 10)))
+        rows = _profile_codex_log_items(
+            identity,
+            start_date=start_date.strip(),
+            end_date=end_date.strip(),
+            limit=1000,
+        )
+        total = len(rows)
+        offset = (safe_page - 1) * safe_page_size
+        return {
+            "items": rows[offset: offset + safe_page_size],
+            "total": total,
+            "page": safe_page,
+            "page_size": safe_page_size,
         }
 
     @router.post("/api/me/qq-bind-url")

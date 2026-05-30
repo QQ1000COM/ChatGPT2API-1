@@ -49,6 +49,11 @@ class ResponseCreateRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     model: str | None = None
     input: object | None = None
+    instructions: object | None = None
+    previous_response_id: str | None = None
+    reasoning: dict[str, object] | None = None
+    reasoning_effort: str | None = None
+    prompt_cache_key: str | None = None
     tools: list[dict[str, object]] | None = None
     tool_choice: object | None = None
     stream: bool | None = None
@@ -360,6 +365,7 @@ def create_router() -> APIRouter:
                             completed_response,
                             body_payload.get("input"),
                             body_payload.get("_previous_context_items") if isinstance(body_payload.get("_previous_context_items"), list) else None,
+                            body_payload.get("instructions"),
                         )
                         _record_usage(
                             identity,
@@ -377,6 +383,7 @@ def create_router() -> APIRouter:
                     result,
                     payload.get("input"),
                     payload.get("_previous_context_items") if isinstance(payload.get("_previous_context_items"), list) else None,
+                    payload.get("instructions"),
                 )
                 _record_usage(
                     identity,
