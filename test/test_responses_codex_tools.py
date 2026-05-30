@@ -276,6 +276,40 @@ def test_responses_codex_tool_output_english_analysis_keeps_calling_tools(monkey
     assert item["name"] == "shell_command"
 
 
+def test_responses_codex_chinese_analysis_question_keeps_repairing(monkeypatch):
+    monkeypatch.setattr(
+        openai_v1_response,
+        "stream_text_deltas",
+        lambda backend, request: iter([
+            "我已经获取了 config_generator.go 的局部部分，主要涉及 DNS 配置生成和代理节点转换逻辑。"
+            "你是想分析这个文件的变动，还是需要我帮你提取特定改动点或者优化建议？"
+        ]),
+    )
+    monkeypatch.setattr(openai_v1_response, "text_backend", lambda: object())
+
+    response = openai_v1_response.handle({
+        "model": "gpt-5.1-codex",
+        "input": [{
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "backend/modules/proxy/config_generator.go:466: dns config\n",
+        }],
+        "_previous_input_items": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "修复Sing-box核心启动错误"}],
+        }],
+        "tools": [{"type": "function", "name": "shell_command"}],
+    })
+
+    assert isinstance(response, dict)
+    item = response["output"][0]
+    assert item["type"] == "function_call"
+    assert item["name"] == "shell_command"
+    assert "backend/modules/proxy/config_generator.go" in item["arguments"]
+    assert "Get-Content" in item["arguments"]
+
+
 def test_responses_function_output_followup(monkeypatch):
     monkeypatch.setattr(
         openai_v1_response,

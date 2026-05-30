@@ -33,6 +33,7 @@ TOOL_CALL_SYSTEM_MESSAGE = """
 你不能自己执行本地工具，只能请求客户端执行工具调用。
 You cannot execute local tools yourself; only request tool calls for the client to execute.
 当用户要求修复、实现、检查、升级、部署、运行测试、推送，或处理项目内任务时，必须优先请求可用工具调用，不要停在说明、确认或英文计划。
+如果用户要求“修复源码/修复错误/实现功能”，你必须按“定位 -> 修改文件 -> 运行测试/验证”的顺序推进；读取或扫描目录只是中间步骤，不能把“是否要我修改/是否需要建议”作为最终回答。
 工具返回结果后，如果任务还没有真正完成，必须继续请求下一个工具调用，不要把中间状态当成最终回答。
 需要仓库上下文时，先调用 shell/command 类工具。
 每次最多请求一个工具调用。
@@ -55,13 +56,15 @@ ACTION_REQUEST_RE = re.compile(
 )
 CLARIFICATION_REQUEST_RE = re.compile(
     r"(do you want|would you like|should i|which option|merge .* cherry-pick|cherry-pick .* merge|"
-    r"你想|是否要|要不要|需要你|请确认|选择|合并还是|还是.*挑选)",
+    r"你想|你是想|是否要|要不要|需要你|需要我|需要我帮你|是否需要我|要我|请确认|选择|合并还是|还是.*挑选|"
+    r"还是需要我|提取特定|优化建议)",
     re.IGNORECASE,
 )
 INTERMEDIATE_PROGRESS_RE = re.compile(
     r"(next step|you'?re now ready|i will|i'll|i need|i should|i can|let me|ready to|"
     r"now i|we need|i found|i would|i recommend|from the files|key observations|suggests|most likely|"
-    r"下一步|接下来|我会|我先|我需要|我将|准备|还需要|继续执行|继续处理|需要继续|没有完成|中断|报错|错误|失败)",
+    r"下一步|接下来|我会|我先|我需要|我将|准备|还需要|继续执行|继续处理|需要继续|没有完成|中断|报错|错误|失败|"
+    r"我已经获取|已经获取|主要涉及|变动点|分析|建议)",
     re.IGNORECASE,
 )
 COMPLETION_TEXT_RE = re.compile(
@@ -695,7 +698,29 @@ def _next_codex_command(task_text: str, model_text: str = "") -> str:
         return 'rg -n "function_call|function_call_output|tool_call|Responses|Codex|previous_response|store_response|response.completed" api services test'
     if any(keyword in text for keyword in ["upstream", "release", "github", "上游", "同步", "升级", "版本"]):
         return "git status --short; git branch --show-current; git remote -v; git log --oneline --decorate --max-count=12"
+    target_files = _mentioned_source_files(f"{task_text}\n{model_text}")
+    if target_files:
+        file_args = " ".join(target_files[:4])
+        return f'git status --short; rg -n "TODO|FIXME|error|错误|legacy|deprecated|DNS|dns|outbound|route|sing-box|fake-ip|special" {file_args}; Get-Content -Encoding utf8 {target_files[0]} | Select-Object -First 260'
     return "git status --short; rg --files | Select-Object -First 120"
+
+
+def _mentioned_source_files(text: str) -> list[str]:
+    value = str(text or "")
+    if not value:
+        return []
+    matches = re.findall(
+        r"[\w./\\-]+\.(?:py|ts|tsx|js|jsx|go|rs|java|cs|cpp|c|h|hpp|php|rb|swift|kt|kts|vue|svelte|json|ya?ml|toml|md)",
+        value,
+        flags=re.IGNORECASE,
+    )
+    result: list[str] = []
+    for match in matches:
+        cleaned = match.strip("`'\"，。；;:()[]{}<>")
+        if not cleaned or cleaned in result:
+            continue
+        result.append(cleaned)
+    return result
 
 
 def _forced_initial_tool_call(tools: list[dict[str, Any]], messages: list[dict[str, Any]]) -> dict[str, Any] | None:
