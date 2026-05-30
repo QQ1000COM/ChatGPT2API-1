@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 
 from services.protocol import openai_v1_response
-from services.protocol.response_store import input_to_items
+from services.protocol.response_store import get_context_items, input_to_items, store_response
 from utils.helper import responses_sse_stream
 
 
@@ -58,6 +58,63 @@ def test_responses_function_call_stream(monkeypatch):
 
     assert any(event.get("type") == "response.function_call_arguments.delta" for event in events)
     assert any(event.get("type") == "response.output_item.added" for event in events)
+    completed = [event for event in events if event.get("type") == "response.completed"][-1]
+    assert completed["response"]["output"][0]["type"] == "function_call"
+
+
+def test_responses_codex_streams_progress_before_fallback_tool_call(monkeypatch):
+    monkeypatch.setattr(
+        openai_v1_response,
+        "stream_text_deltas",
+        lambda backend, request: iter([
+            "我已经定位到 backend/modules/core/service.go，接下来需要直接修改实现。"
+        ]),
+    )
+    monkeypatch.setattr(openai_v1_response, "text_backend", lambda: object())
+
+    events = list(openai_v1_response.handle({
+        "model": "gpt-5.1-codex",
+        "stream": True,
+        "input": [{
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "backend/modules/core/service.go\n",
+        }],
+        "_previous_context_items": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "修复Sing-box核心启动错误"}],
+        }],
+        "tools": [{"type": "function", "name": "shell_command"}],
+    }))
+
+    assert any(event.get("type") == "response.output_text.delta" for event in events)
+    completed = [event for event in events if event.get("type") == "response.completed"][-1]
+    output = completed["response"]["output"]
+    assert output[0]["type"] == "message"
+    assert output[1]["type"] == "function_call"
+    assert output[1]["name"] == "shell_command"
+    assert "backend/modules/core/service.go" in output[1]["arguments"]
+
+
+def test_responses_codex_stream_hides_direct_json_tool_payload(monkeypatch):
+    monkeypatch.setattr(
+        openai_v1_response,
+        "stream_text_deltas",
+        lambda backend, request: iter([
+            '{"type":"function_call","name":"shell_command","arguments":{"command":"git status --short"}}'
+        ]),
+    )
+    monkeypatch.setattr(openai_v1_response, "text_backend", lambda: object())
+
+    events = list(openai_v1_response.handle({
+        "model": "gpt-5.1-codex",
+        "stream": True,
+        "input": "show status",
+        "tools": [{"type": "function", "name": "shell_command"}],
+    }))
+
+    assert not any(event.get("type") == "response.output_text.delta" for event in events)
     completed = [event for event in events if event.get("type") == "response.completed"][-1]
     assert completed["response"]["output"][0]["type"] == "function_call"
 
@@ -296,6 +353,44 @@ def test_responses_codex_tool_output_confirmation_question_keeps_calling_tools(m
     assert "git remote -v" in item["arguments"]
 
 
+def test_responses_codex_previous_context_keeps_original_task(monkeypatch):
+    monkeypatch.setattr(
+        openai_v1_response,
+        "stream_text_deltas",
+        lambda backend, request: iter(["如果你希望，我可以直接实现这个改动。你希望我直接实现吗？"]),
+    )
+    monkeypatch.setattr(openai_v1_response, "text_backend", lambda: object())
+
+    response = openai_v1_response.handle({
+        "model": "gpt-5.1-codex",
+        "_previous_context_items": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "修复Sing-box核心启动错误"}],
+            },
+            {
+                "type": "function_call",
+                "name": "shell_command",
+                "call_id": "call_scan",
+                "arguments": "{\"command\":\"rg --files\"}",
+            },
+        ],
+        "input": [{
+            "type": "function_call_output",
+            "call_id": "call_scan",
+            "output": "backend/modules/core/service.go\n",
+        }],
+        "tools": [{"type": "function", "name": "shell_command"}],
+    })
+
+    assert isinstance(response, dict)
+    item = response["output"][0]
+    assert item["type"] == "function_call"
+    assert item["name"] == "shell_command"
+    assert "backend/modules/core/service.go" in item["arguments"]
+
+
 def test_responses_codex_tool_output_english_analysis_keeps_calling_tools(monkeypatch):
     monkeypatch.setattr(
         openai_v1_response,
@@ -520,6 +615,42 @@ def test_response_store_preserves_function_call_output_items():
     assert items[0]["type"] == "message"
     assert items[1]["type"] == "function_call_output"
     assert items[1]["call_id"] == "call_1"
+
+
+def test_response_store_preserves_full_previous_context_chain():
+    identity = {"id": "context-chain-test"}
+    first_response = {
+        "id": "resp_context_1",
+        "output": [{
+            "type": "function_call",
+            "name": "shell_command",
+            "call_id": "call_1",
+            "arguments": "{\"command\":\"rg --files\"}",
+        }],
+    }
+    store_response(identity, first_response, "修复Sing-box核心启动错误")
+    first_context = get_context_items(identity, "resp_context_1")
+
+    second_response = {
+        "id": "resp_context_2",
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "你希望我直接实现吗？"}],
+        }],
+    }
+    store_response(
+        identity,
+        second_response,
+        [{"type": "function_call_output", "call_id": "call_1", "output": "backend/modules/core/service.go"}],
+        first_context,
+    )
+
+    second_context = get_context_items(identity, "resp_context_2")
+    combined = "\n".join(str(item) for item in second_context)
+    assert "修复Sing-box核心启动错误" in combined
+    assert "function_call_output" in combined
+    assert "你希望我直接实现吗" in combined
 
 
 def test_codex_large_context_is_compacted_before_upstream():

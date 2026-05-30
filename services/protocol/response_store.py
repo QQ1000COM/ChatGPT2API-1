@@ -101,17 +101,34 @@ def input_to_items(input_value: object) -> list[dict[str, Any]]:
     return []
 
 
-def store_response(identity: dict[str, object], response: dict[str, Any], input_value: object) -> None:
+def store_response(
+    identity: dict[str, object],
+    response: dict[str, Any],
+    input_value: object,
+    previous_context_items: list[dict[str, Any]] | None = None,
+) -> None:
     response_id = str(response.get("id") or "").strip()
     if not response_id:
         return
     _prune()
     owner_id = _owner_id(identity)
+    input_items = input_to_items(input_value)
+    if not isinstance(previous_context_items, list):
+        previous_context_items = []
+    output_items = response.get("output")
+    if not isinstance(output_items, list):
+        output_items = []
+    context_items = [
+        *copy.deepcopy(previous_context_items),
+        *copy.deepcopy(input_items),
+        *copy.deepcopy(output_items),
+    ]
     _responses[_key(owner_id, response_id)] = {
         "created_at": _now(),
         "expires_at": _now() + RESPONSE_TTL_SECONDS,
         "response": copy.deepcopy(response),
-        "input_items": input_to_items(input_value),
+        "input_items": input_items,
+        "context_items": context_items,
     }
 
 
@@ -121,6 +138,24 @@ def get_response(identity: dict[str, object], response_id: str) -> dict[str, Any
     if not item:
         raise HTTPException(status_code=404, detail={"error": "response not found"})
     return copy.deepcopy(item["response"])
+
+
+def get_context_items(identity: dict[str, object], response_id: str) -> list[dict[str, Any]]:
+    _prune()
+    item = _responses.get(_key(_owner_id(identity), response_id))
+    if not item:
+        raise HTTPException(status_code=404, detail={"error": "response not found"})
+    context_items = item.get("context_items")
+    if isinstance(context_items, list):
+        return copy.deepcopy(context_items)
+    data = []
+    input_items = item.get("input_items")
+    if isinstance(input_items, list):
+        data.extend(copy.deepcopy(input_items))
+    response = item.get("response")
+    if isinstance(response, dict) and isinstance(response.get("output"), list):
+        data.extend(copy.deepcopy(response["output"]))
+    return data
 
 
 def delete_response(identity: dict[str, object], response_id: str) -> dict[str, Any]:

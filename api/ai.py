@@ -21,7 +21,7 @@ from services.protocol import (
     openai_search,
 )
 from services.protocol.conversation import count_message_image_tokens, count_message_text_tokens
-from services.protocol.response_store import delete_response, get_response, list_input_items, store_response, update_response_status
+from services.protocol.response_store import delete_response, get_context_items, get_response, list_input_items, store_response, update_response_status
 
 
 class ImageGenerationRequest(BaseModel):
@@ -325,6 +325,7 @@ def create_router() -> APIRouter:
         if previous_response_id:
             try:
                 payload["_previous_response"] = get_response(identity, previous_response_id)
+                payload["_previous_context_items"] = get_context_items(identity, previous_response_id)
                 payload["_previous_input_items"] = list_input_items(
                     identity,
                     previous_response_id,
@@ -354,7 +355,12 @@ def create_router() -> APIRouter:
                             completed_response = event["response"]
                         yield event
                     if completed_response:
-                        store_response(identity, completed_response, body_payload.get("input"))
+                        store_response(
+                            identity,
+                            completed_response,
+                            body_payload.get("input"),
+                            body_payload.get("_previous_context_items") if isinstance(body_payload.get("_previous_context_items"), list) else None,
+                        )
                         _record_usage(
                             identity,
                             "responses",
@@ -366,7 +372,12 @@ def create_router() -> APIRouter:
 
             result = await call.run(handle_and_store, payload, sse="responses")
             if isinstance(result, dict):
-                store_response(identity, result, payload.get("input"))
+                store_response(
+                    identity,
+                    result,
+                    payload.get("input"),
+                    payload.get("_previous_context_items") if isinstance(payload.get("_previous_context_items"), list) else None,
+                )
                 _record_usage(
                     identity,
                     "responses",

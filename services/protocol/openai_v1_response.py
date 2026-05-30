@@ -83,8 +83,8 @@ ACTION_REQUEST_RE = re.compile(
 )
 CLARIFICATION_REQUEST_RE = re.compile(
     r"(do you want|would you like|should i|which option|merge .* cherry-pick|cherry-pick .* merge|"
-    r"你想|你是想|是否要|要不要|需要你|需要我|需要我帮你|是否需要我|要我|请确认|选择|合并还是|还是.*挑选|"
-    r"还是需要我|提取特定|优化建议)",
+    r"你想|你是想|你希望|是否要|要不要|需要你|需要我|需要我帮你|是否需要我|要我|请确认|选择|合并还是|还是.*挑选|"
+    r"还是需要我|直接实现|实现吗|提取特定|优化建议)",
     re.IGNORECASE,
 )
 INTERMEDIATE_PROGRESS_RE = re.compile(
@@ -393,6 +393,14 @@ def _message_from_response_item(item: dict[str, Any]) -> dict[str, Any] | None:
 
 def previous_messages_from_body(body: dict[str, Any]) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
+    context_items = body.get("_previous_context_items")
+    if isinstance(context_items, list):
+        for item in context_items:
+            if isinstance(item, dict):
+                message = _message_from_response_item(item)
+                if message:
+                    messages.append(message)
+        return messages
     input_items = body.get("_previous_input_items")
     if isinstance(input_items, list):
         for item in input_items:
@@ -976,17 +984,19 @@ def _next_codex_tool_call(
                 "arguments": _tool_argument_for_path(read_tool, target_files[0]),
             }
         if shell_tool:
+            command_text = f"{task_text}\n{' '.join(target_files)}" if target_files else task_text
             return {
                 "type": "function_call",
                 "name": _tool_name(shell_tool),
-                "arguments": _tool_argument_for_command(shell_tool, _next_codex_command(task_text, model_text)),
+                "arguments": _tool_argument_for_command(shell_tool, _next_codex_command(command_text, model_text)),
             }
 
     if shell_tool:
+        command_text = f"{task_text}\n{' '.join(target_files)}" if target_files else task_text
         return {
             "type": "function_call",
             "name": _tool_name(shell_tool),
-            "arguments": _tool_argument_for_command(shell_tool, _next_codex_command(task_text, model_text)),
+            "arguments": _tool_argument_for_command(shell_tool, _next_codex_command(command_text, model_text)),
         }
     if read_tool and target_files:
         return {
@@ -1182,6 +1192,19 @@ def response_output_text(output: list[dict[str, Any]]) -> str:
     return "".join(parts)
 
 
+def _is_direct_tool_payload_text(text: str) -> bool:
+    preview = str(text or "").lstrip()
+    if not preview:
+        return False
+    lowered = preview.lower()
+    return (
+        preview.startswith("{")
+        or lowered.startswith("```json")
+        or lowered.startswith("```")
+        or preview.startswith("*** Begin Patch")
+    )
+
+
 def response_created(response_id: str, model: str, created: int) -> dict[str, Any]:
     return {
         "type": "response.created",
@@ -1291,35 +1314,95 @@ def stream_tool_response(backend, body: dict[str, Any], messages: list[dict[str,
     response_id = f"resp_{uuid.uuid4().hex}"
     created = int(time.time())
     full_text = ""
+    codex_progress = bool(body.get("stream") and _messages_are_codex_mode(messages))
+    progress_decided = False
+    progress_suppressed = False
+    progress_item_id = f"msg_{uuid.uuid4().hex}"
+    progress_output_index = 0
+    progress_started = False
     yield response_created(response_id, model, created)
     request = ConversationRequest(model=model, messages=messages)
     for delta in stream_text_deltas(backend, request):
         full_text += delta
+        if codex_progress:
+            if not progress_decided:
+                preview = full_text.lstrip()
+                if preview:
+                    progress_decided = True
+                    progress_suppressed = _is_direct_tool_payload_text(preview)
+                    if not progress_suppressed:
+                        progress_started = True
+                        yield {
+                            "type": "response.output_item.added",
+                            "output_index": progress_output_index,
+                            "item": {**text_output_item("", progress_item_id, "in_progress"), "content": []},
+                        }
+                        yield {
+                            "type": "response.content_part.added",
+                            "item_id": progress_item_id,
+                            "output_index": progress_output_index,
+                            "content_index": 0,
+                            "part": {"type": "output_text", "text": "", "annotations": []},
+                        }
+            if progress_started and not progress_suppressed:
+                yield {
+                    "type": "response.output_text.delta",
+                    "item_id": progress_item_id,
+                    "output_index": progress_output_index,
+                    "content_index": 0,
+                    "delta": delta,
+                }
     parsed = parse_tool_or_message(full_text, tools, messages)
+    progress_item = text_output_item(full_text, progress_item_id, "completed") if progress_started and not progress_suppressed else None
+    if progress_item:
+        yield {
+            "type": "response.output_text.done",
+            "item_id": progress_item_id,
+            "output_index": progress_output_index,
+            "content_index": 0,
+            "text": full_text,
+        }
+        yield {
+            "type": "response.content_part.done",
+            "item_id": progress_item_id,
+            "output_index": progress_output_index,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": full_text, "annotations": []},
+        }
+        yield {"type": "response.output_item.done", "output_index": progress_output_index, "item": progress_item}
     if parsed["type"] == "function_call":
         item = function_call_item(str(parsed.get("name") or ""), parsed.get("arguments") or {})
-        yield {"type": "response.output_item.added", "output_index": 0, "item": {**item, "status": "in_progress", "arguments": ""}}
+        function_output_index = 1 if progress_item else 0
+        yield {"type": "response.output_item.added", "output_index": function_output_index, "item": {**item, "status": "in_progress", "arguments": ""}}
         yield {
             "type": "response.function_call_arguments.delta",
             "item_id": item["id"],
-            "output_index": 0,
+            "output_index": function_output_index,
             "delta": item["arguments"],
         }
         yield {
             "type": "response.function_call_arguments.done",
             "item_id": item["id"],
-            "output_index": 0,
+            "output_index": function_output_index,
             "arguments": item["arguments"],
         }
-        yield {"type": "response.output_item.done", "output_index": 0, "item": item}
+        yield {"type": "response.output_item.done", "output_index": function_output_index, "item": item}
         usage = token_usage(
             input_text_tokens=count_message_text_tokens(messages, model),
-            output_text_tokens=count_text_tokens(item["arguments"], model),
+            output_text_tokens=count_text_tokens(f"{full_text}\n{item['arguments']}", model),
         )
-        yield response_completed(response_id, model, created, [item], usage)
+        output = [progress_item, item] if progress_item else [item]
+        yield response_completed(response_id, model, created, output, usage)
         return
 
     text = _normalize_codex_final_text(str(parsed.get("content") or full_text))
+    if progress_item:
+        usage = token_usage(
+            input_text_tokens=count_message_text_tokens(messages, model),
+            output_text_tokens=count_text_tokens(text, model),
+        )
+        yield response_completed(response_id, model, created, [progress_item], usage)
+        return
     item = text_output_item(text)
     yield {"type": "response.output_item.added", "output_index": 0, "item": {**text_output_item("", item["id"], "in_progress"), "content": []}}
     yield {
