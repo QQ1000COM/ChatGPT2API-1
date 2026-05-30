@@ -4,6 +4,7 @@ import localforage from "localforage";
 
 import {
   clearServerImageConversations,
+  fetchImageConversation,
   deleteServerImageConversation,
   fetchImageConversations,
   renameServerImageConversation,
@@ -232,8 +233,43 @@ function getTimestamp(value: string) {
   return Number.isFinite(time) ? time : 0;
 }
 
+function mergeRichAssets(primary: ImageConversation, fallback: ImageConversation): ImageConversation {
+  const fallbackTurns = new Map(fallback.turns.map((turn) => [turn.id, turn]));
+  return {
+    ...primary,
+    turns: primary.turns.map((turn, turnIndex) => {
+      const fallbackTurn = fallbackTurns.get(turn.id) || fallback.turns[turnIndex];
+      if (!fallbackTurn) {
+        return turn;
+      }
+      return {
+        ...turn,
+        referenceImages: turn.referenceImages.map((image, imageIndex) => {
+          if (image.dataUrl) {
+            return image;
+          }
+          const fallbackImage = fallbackTurn.referenceImages[imageIndex];
+          return fallbackImage?.dataUrl ? { ...image, dataUrl: fallbackImage.dataUrl } : image;
+        }),
+        images: turn.images.map((image, imageIndex) => {
+          if (image.b64_json || image.url) {
+            return image;
+          }
+          const fallbackImage = fallbackTurn.images[imageIndex];
+          return fallbackImage ? { ...image, b64_json: fallbackImage.b64_json, url: fallbackImage.url } : image;
+        }),
+      };
+    }),
+  };
+}
+
 function pickLatestConversation(current: ImageConversation, next: ImageConversation) {
-  return getTimestamp(next.updatedAt) >= getTimestamp(current.updatedAt) ? next : current;
+  if (next.turns.length === 0 && current.turns.length > 0) {
+    return { ...current, title: next.title || current.title, updatedAt: next.updatedAt || current.updatedAt };
+  }
+  const picked = getTimestamp(next.updatedAt) >= getTimestamp(current.updatedAt) ? next : current;
+  const fallback = picked === next ? current : next;
+  return mergeRichAssets(picked, fallback);
 }
 
 function mergeConversationLists(...lists: ImageConversation[][]): ImageConversation[] {
@@ -271,18 +307,26 @@ export async function getCachedImageConversations(): Promise<ImageConversation[]
 export async function listImageConversations(): Promise<ImageConversation[]> {
   const localItems = await readStoredImageConversations();
   try {
-    const remote = await fetchImageConversations();
+    const remote = await fetchImageConversations({ summary: true });
     const remoteItems = Array.isArray(remote.items)
       ? remote.items.map((item) => normalizeConversation(item as ImageConversation & Record<string, unknown>))
       : [];
     const merged = mergeConversationLists(remoteItems, localItems);
     await imageConversationStorage.setItem(IMAGE_CONVERSATIONS_KEY, merged);
-    if (localItems.length > 0 && JSON.stringify(merged) !== JSON.stringify(remoteItems)) {
-      void replaceServerImageConversations(merged);
-    }
     return merged;
   } catch {
     return sortImageConversations(localItems);
+  }
+}
+
+export async function loadImageConversationDetail(id: string): Promise<ImageConversation | null> {
+  try {
+    const response = await fetchImageConversation(id);
+    const item = normalizeConversation(response.item as ImageConversation & Record<string, unknown>);
+    await saveImageConversation(item);
+    return item;
+  } catch {
+    return null;
   }
 }
 

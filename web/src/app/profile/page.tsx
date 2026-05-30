@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Copy, Download, Folder, LoaderCircle, Maximize2, MessageCircle, RefreshCw } from "lucide-react";
+import { BarChart3, Code2, Copy, DollarSign, Download, Folder, KeyRound, LoaderCircle, Maximize2, MessageCircle, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import { ImageLightbox } from "@/components/image-lightbox";
@@ -116,6 +116,24 @@ export default function ProfilePage() {
     }
   };
 
+  const formatNumber = (value: number | undefined) => (value || 0).toLocaleString();
+  const formatUsd = (value: number | undefined) => `$${(value || 0).toFixed(6)}`;
+  const maskKey = (value: string | undefined) => {
+    const normalized = String(value || "").trim();
+    if (!normalized) return "-";
+    if (normalized.length <= 12) return `${normalized.slice(0, 3)}***${normalized.slice(-2)}`;
+    return `${normalized.slice(0, 7)}...${normalized.slice(-4)}`;
+  };
+
+  const copyText = async (value: string, message: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      toast.success(message);
+    } catch {
+      toast.error("澶嶅埗澶辫触");
+    }
+  };
+
   const imageEntries = useMemo(() => groupProfileImages(data?.images || []), [data?.images]);
   const allLightboxImages = useMemo(
     () =>
@@ -162,6 +180,14 @@ export default function ProfilePage() {
   }
 
   const profile = data?.profile;
+  const apiUsage = data?.api_usage?.usage;
+  const pricingModels = data?.api_pricing?.models || {};
+  const apiBaseUrl =
+    data?.api_base_url || (typeof window !== "undefined" ? `${window.location.origin}/v1` : "/v1");
+  const curlExample = `curl ${apiBaseUrl}/chat/completions \\
+  -H "Authorization: Bearer ${session.key}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model":"gpt-5.1","messages":[{"role":"user","content":"你好"}],"stream":false}'`;
   const unlimited = Boolean(profile?.unlimited);
   const remaining = unlimited ? "不限" : String(profile?.remaining ?? 0);
   const quota = unlimited ? "不限" : String(profile?.quota ?? 0);
@@ -193,6 +219,112 @@ export default function ProfilePage() {
             <div className="mt-2 truncate text-2xl font-black text-foreground">{value}</div>
           </div>
         ))}
+      </section>
+
+      <section className="grid gap-3 lg:grid-cols-[1.1fr_0.9fr]">
+        <div className="rounded-2xl border border-border bg-card p-4 shadow-sm">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2 text-sm font-semibold">
+                <BarChart3 className="size-4 text-muted-foreground" />
+                API 使用数据
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                Token 成本按 {data?.api_usage?.pricing_model || data?.api_pricing?.default_model || "gpt-5.1"} 官方 API 价格估算，实际以 OpenAI 账单为准。
+              </div>
+            </div>
+            <div className="rounded-full border border-border bg-background px-3 py-1 text-xs text-muted-foreground">
+              {formatUsd(data?.api_usage?.estimated_cost_usd)}
+            </div>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-3">
+            {[
+              ["总请求", formatNumber(data?.api_usage?.total_calls)],
+              ["输入 Token", formatNumber(apiUsage?.input_tokens)],
+              ["输出 Token", formatNumber(apiUsage?.output_tokens)],
+              ["Chat", formatNumber(apiUsage?.chat_calls)],
+              ["Responses", formatNumber(apiUsage?.response_calls)],
+              ["图片/任务", formatNumber(apiUsage?.image_calls)],
+              ["附件", formatNumber(apiUsage?.attachments)],
+              ["生成图片", formatNumber(apiUsage?.images)],
+              ["Models", formatNumber(apiUsage?.model_calls)],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded-xl border border-border bg-background px-3 py-2">
+                <div className="text-[11px] text-muted-foreground">{label}</div>
+                <div className="mt-1 truncate text-lg font-black text-foreground">{value}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-border bg-card p-4 shadow-sm">
+          <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
+            <DollarSign className="size-4 text-muted-foreground" />
+            Token 价格
+          </div>
+          <div className="space-y-2">
+            {Object.entries(pricingModels).slice(0, 5).map(([model, price]) => (
+              <div key={model} className="flex items-center justify-between gap-3 rounded-xl border border-border bg-background px-3 py-2 text-xs">
+                <span className="font-medium text-foreground">{model}</span>
+                <span className="text-right text-muted-foreground">
+                  in ${price.input}/1M · out ${price.output}/1M
+                </span>
+              </div>
+            ))}
+          </div>
+          <a
+            href={data?.api_pricing?.source || "https://openai.com/api/pricing"}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-3 inline-flex text-xs font-medium text-primary hover:underline"
+          >
+            查看 OpenAI 官方价格
+          </a>
+        </div>
+      </section>
+
+      <section className="rounded-2xl border border-border bg-card p-4 shadow-sm">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <Code2 className="size-4 text-muted-foreground" />
+              API 说明和使用方式
+            </div>
+            <div className="mt-1 text-xs text-muted-foreground">兼容 OpenAI SDK、Chat Completions、Responses、Images、Models。</div>
+          </div>
+          <Button type="button" variant="outline" className="rounded-xl" onClick={() => void copyText(apiBaseUrl, "Base URL 已复制")}>
+            <Copy className="size-4" />
+            复制 Base URL
+          </Button>
+        </div>
+        <div className="grid gap-3 lg:grid-cols-2">
+          <div className="space-y-2 rounded-xl border border-border bg-background p-3 text-sm">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-muted-foreground">Base URL</span>
+              <code className="truncate text-xs">{apiBaseUrl}</code>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-muted-foreground">API Key</span>
+              <span className="inline-flex items-center gap-2 text-xs">
+                <KeyRound className="size-3.5" />
+                {maskKey(session.key)}
+              </span>
+            </div>
+            <div className="text-xs leading-6 text-muted-foreground">
+              OpenAI SDK 的 baseURL 填上方地址，apiKey 填当前登录密钥；Codex/IDE 也使用同样 Base URL 和 Bearer Key。
+            </div>
+          </div>
+          <div className="rounded-xl border border-border bg-background p-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <span className="text-xs font-semibold text-muted-foreground">curl 示例</span>
+              <Button type="button" variant="ghost" className="h-7 rounded-lg px-2 text-xs" onClick={() => void copyText(curlExample, "示例已复制")}>
+                <Copy className="size-3.5" />
+                复制
+              </Button>
+            </div>
+            <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs leading-5 text-muted-foreground">{curlExample}</pre>
+          </div>
+        </div>
       </section>
 
       <section className="rounded-2xl border border-border bg-card p-4 shadow-sm">

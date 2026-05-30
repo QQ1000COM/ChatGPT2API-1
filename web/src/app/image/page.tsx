@@ -35,6 +35,7 @@ import {
   getCachedImageConversations,
   getImageConversationStats,
   listImageConversations,
+  loadImageConversationDetail,
   renameImageConversation,
   saveImageConversation,
   saveImageConversations,
@@ -474,6 +475,25 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     () => conversations.find((item) => item.id === selectedConversationId) ?? null,
     [conversations, selectedConversationId],
   );
+  useEffect(() => {
+    if (!selectedConversation || selectedConversation.turns.some((turn) => turn.images.length > 0)) {
+      return;
+    }
+    let cancelled = false;
+    void loadImageConversationDetail(selectedConversation.id).then((item) => {
+      if (cancelled || !item) {
+        return;
+      }
+      setConversations((prev) => {
+        const next = [item, ...prev.filter((conversation) => conversation.id !== item.id)];
+        conversationsRef.current = next;
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedConversation]);
   const activeTaskCount = useMemo(
     () =>
       conversations.reduce((sum, conversation) => {
@@ -609,6 +629,13 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
           } else {
             setSelectedConversationId(pickFallbackConversationId(cachedItems));
           }
+          initialLoadCompleteRef.current = true;
+          setIsLoadingHistory(false);
+        }
+
+        if (!cancelled && cachedItems.length === 0) {
+          conversationsRef.current = [];
+          setConversations([]);
           initialLoadCompleteRef.current = true;
           setIsLoadingHistory(false);
         }
@@ -1804,7 +1831,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                 }
               }, 200);
             }}
-            className={`hide-scrollbar min-h-0 flex-1 overscroll-contain px-1 pt-14 pb-6 sm:px-4 sm:pt-16 sm:pb-8 ${selectedConversation ? "overflow-y-auto" : "overflow-hidden"}`}
+            className={`hide-scrollbar min-h-0 flex-1 overscroll-contain px-1 pt-14 pb-[280px] sm:px-4 sm:pt-16 sm:pb-[300px] ${selectedConversation ? "overflow-y-auto" : "overflow-hidden"}`}
           >
             {isLoadingHistory ? (
               // 历史加载完成前先占位，避免 selectedConversation === null 触发的"空状态"
@@ -1828,14 +1855,14 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             )}
           </div>
 
-          <div className="relative shrink-0 px-1 sm:px-4">
+          <div className="pointer-events-none fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+1rem)] z-40 px-3 sm:px-6">
             {selectedConversation && showBottomFade ? (
               <div
                 aria-hidden
                 className="pointer-events-none absolute inset-x-0 bottom-full h-10 bg-gradient-to-b from-transparent to-background sm:h-14"
               />
             ) : null}
-            <div className="mx-auto w-full max-w-[820px]">
+            <div className="pointer-events-auto mx-auto w-full max-w-[820px]">
             <ImageComposer
               prompt={imagePrompt}
               imageCount={imageCount}

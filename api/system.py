@@ -23,6 +23,34 @@ from services.proxy_service import test_proxy
 from services.remote_storage_service import RemoteStorageError, test_remote_storage
 
 
+API_USAGE_COUNTERS = (
+    "chat_calls",
+    "response_calls",
+    "message_calls",
+    "image_calls",
+    "model_calls",
+    "input_tokens",
+    "output_tokens",
+    "images",
+    "attachments",
+)
+
+OPENAI_API_PRICING = {
+    "default_model": "gpt-5.1",
+    "currency": "USD",
+    "unit": "per_1m_tokens",
+    "source": "https://openai.com/api/pricing",
+    "updated_at": "2026-05-30",
+    "models": {
+        "gpt-5.1": {"input": 1.25, "cached_input": 0.125, "output": 10.0},
+        "gpt-5.1-codex": {"input": 1.25, "cached_input": 0.125, "output": 10.0},
+        "gpt-5.1-codex-mini": {"input": 0.25, "cached_input": 0.025, "output": 2.0},
+        "gpt-5-mini": {"input": 0.25, "cached_input": 0.025, "output": 2.0},
+        "gpt-5-nano": {"input": 0.05, "cached_input": 0.005, "output": 0.4},
+    },
+}
+
+
 def _admin_owner_ids() -> set[str]:
     """收集所有可能落在 image_owners.json 里的 admin id：
     - "admin"：旧 auth_key（CHATGPT2API_AUTH_KEY / config.json.auth-key）的固定 id
@@ -50,6 +78,50 @@ def _request_origin(request: Request) -> str:
     scheme = str(request.headers.get("x-forwarded-proto") or request.url.scheme).split(",")[0].strip()
     host = str(request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc).split(",")[0].strip()
     return f"{scheme}://{host}".rstrip("/")
+
+
+def _empty_api_usage() -> dict[str, int]:
+    return {key: 0 for key in API_USAGE_COUNTERS}
+
+
+def _normalize_api_usage(value: object) -> dict[str, int]:
+    raw = value if isinstance(value, dict) else {}
+    result = _empty_api_usage()
+    for key in API_USAGE_COUNTERS:
+        try:
+            result[key] = max(0, int(raw.get(key) or 0))
+        except (TypeError, ValueError):
+            result[key] = 0
+    return result
+
+
+def _aggregate_api_usage(items: list[dict[str, object]]) -> dict[str, int]:
+    total = _empty_api_usage()
+    for item in items:
+        usage = _normalize_api_usage(item.get("usage"))
+        for key, value in usage.items():
+            total[key] += value
+    return total
+
+
+def _api_usage_summary(profile: dict[str, object]) -> dict[str, object]:
+    usage = _normalize_api_usage(profile.get("usage"))
+    price = OPENAI_API_PRICING["models"][OPENAI_API_PRICING["default_model"]]
+    input_cost = usage["input_tokens"] / 1_000_000 * float(price["input"])
+    output_cost = usage["output_tokens"] / 1_000_000 * float(price["output"])
+    total_calls = (
+        usage["chat_calls"]
+        + usage["response_calls"]
+        + usage["message_calls"]
+        + usage["image_calls"]
+        + usage["model_calls"]
+    )
+    return {
+        "usage": usage,
+        "total_calls": total_calls,
+        "estimated_cost_usd": round(input_cost + output_cost, 6),
+        "pricing_model": OPENAI_API_PRICING["default_model"],
+    }
 
 
 def _qq_callback_url(request: Request) -> str:
@@ -235,6 +307,7 @@ def create_router(app_version: str) -> APIRouter:
         profile = auth_service.get_by_id(identity_id) if identity_id != "admin" else None
         if profile is None:
             admin_profile = config.get_admin_profile() if identity_id == "admin" else {}
+            admin_usage = _aggregate_api_usage(auth_service.list_keys()) if identity_id == "admin" else _empty_api_usage()
             profile = {
                 "id": identity_id or "admin",
                 "name": identity.get("name") or "管理员",
@@ -245,6 +318,7 @@ def create_router(app_version: str) -> APIRouter:
                 "remaining": None,
                 "qq": admin_profile.get("qq") or "",
                 "qq_bound_at": admin_profile.get("qq_bound_at"),
+                "usage": admin_usage,
             }
         admin_ids = _admin_owner_ids()
         owner_filter = "__admin__" if str(identity.get("role") or "") == "admin" or identity_id in admin_ids else identity_id
@@ -264,6 +338,9 @@ def create_router(app_version: str) -> APIRouter:
             "images": image_items[:60],
             "qq_callback_url": _qq_callback_url(request),
             "qq_oauth_enabled": bool(str(config.get_qq_oauth_settings().get("app_id") or "").strip()),
+            "api_base_url": f"{_request_origin(request)}/v1",
+            "api_usage": _api_usage_summary(profile),
+            "api_pricing": OPENAI_API_PRICING,
         }
 
     @router.post("/api/me/qq-bind-url")

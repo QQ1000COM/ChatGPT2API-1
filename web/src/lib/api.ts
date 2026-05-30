@@ -248,6 +248,31 @@ export type MyProfile = {
   images: ManagedImage[];
   qq_callback_url: string;
   qq_oauth_enabled: boolean;
+  api_base_url?: string;
+  api_usage?: {
+    usage: {
+      chat_calls: number;
+      response_calls: number;
+      message_calls: number;
+      image_calls: number;
+      model_calls: number;
+      input_tokens: number;
+      output_tokens: number;
+      images: number;
+      attachments: number;
+    };
+    total_calls: number;
+    estimated_cost_usd: number;
+    pricing_model: string;
+  };
+  api_pricing?: {
+    default_model: string;
+    currency: string;
+    unit: string;
+    source: string;
+    updated_at: string;
+    models: Record<string, { input: number; cached_input?: number; output: number }>;
+  };
 };
 
 export type ImageTask = {
@@ -294,8 +319,12 @@ type ImageTaskCancelResponse = {
   missing_ids: string[];
 };
 
-export async function fetchImageConversations() {
-  return httpRequest<{ items: unknown[] }>("/api/image-conversations");
+export async function fetchImageConversations(options: { summary?: boolean } = {}) {
+  return httpRequest<{ items: unknown[] }>(`/api/image-conversations${options.summary ? "?summary=true" : ""}`);
+}
+
+export async function fetchImageConversation(id: string) {
+  return httpRequest<{ item: unknown }>(`/api/image-conversations/${encodeURIComponent(id)}`);
 }
 
 export async function replaceImageConversations(items: unknown[]) {
