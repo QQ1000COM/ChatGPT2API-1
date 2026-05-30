@@ -124,36 +124,6 @@ const DEFAULT_COMMERCE_DRAFT: CommerceDraft = {
   constraints: "不要生成虚假品牌、平台水印、二维码、乱码文字；产品结构和材质要真实可信；画面可直接用于电商上架。",
 };
 
-function optimizeImagePrompt(prompt: string, hasReferenceImages: boolean) {
-  const text = prompt.trim();
-  if (!text) {
-    return "";
-  }
-  const lower = text.toLowerCase();
-  const hasStructure =
-    text.includes("构图") ||
-    text.includes("光线") ||
-    text.includes("背景") ||
-    text.includes("细节") ||
-    lower.includes("composition") ||
-    lower.includes("lighting");
-  if (hasStructure) {
-    return text;
-  }
-  const modeHint = hasReferenceImages
-    ? "保持参考图的产品主体、结构比例和核心特征不变，只优化画面质感、构图、光线和背景。"
-    : "主体清晰完整，构图稳定，画面有明确视觉焦点。";
-  return [
-    text,
-    "",
-    "优化后的画图要求：",
-    modeHint,
-    "电商级真实质感，干净高级的商业摄影风格，细节锐利，材质真实，光线柔和自然。",
-    "背景简洁不抢主体，避免杂乱元素，保留适合后期排版的安全留白。",
-    "不要生成乱码文字、畸形结构、多余手指、多余配件、变形边缘或低清晰度效果。",
-  ].join("\n");
-}
-
 function buildCommercePrompt(draft: CommerceDraft) {
   const template = COMMERCE_TEMPLATES.find((item) => item.id === draft.template) ?? COMMERCE_TEMPLATES[0];
   const lines = [
@@ -742,23 +712,7 @@ export function ImageComposer({
                     <ImagePlus className="size-3.5 sm:size-4" strokeWidth={2} />
                     <span>{referenceImages.length > 0 ? "添加" : "上传"}</span>
                   </button>
-                  <button
-                    type="button"
-                    className="inline-flex h-9 shrink-0 cursor-pointer items-center gap-1.5 rounded-full bg-stone-100 px-3 text-[12px] font-medium text-stone-700 transition hover:bg-stone-200 disabled:cursor-not-allowed disabled:text-stone-300 sm:h-10 sm:gap-2 sm:px-4 sm:text-[13px]"
-                    onClick={() => {
-                      const nextPrompt = optimizeImagePrompt(prompt, referenceImages.length > 0);
-                      if (!nextPrompt || nextPrompt === prompt.trim()) {
-                        return;
-                      }
-                      onPromptChange(nextPrompt);
-                    }}
-                    disabled={!prompt.trim()}
-                    aria-label="优化提示词"
-                    title="优化提示词"
-                  >
-                    <Sparkles className="size-3.5 sm:size-4" strokeWidth={2} />
-                    <span>优化</span>
-                  </button>
+
                   <span className="inline-flex h-9 shrink-0 items-center gap-1 rounded-full bg-stone-100 px-3 text-[12px] font-medium text-stone-500 sm:h-10 sm:px-3.5 sm:text-[13px]">
                     <span className="hidden sm:inline">剩余</span>
                     {availableQuota === "∞" ? (

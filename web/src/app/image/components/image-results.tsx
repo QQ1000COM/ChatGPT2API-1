@@ -48,7 +48,7 @@ type ImageResultsProps = {
   onRegenerateTurn: (conversationId: string, turnId: string) => void | Promise<void>;
   onRetryImage: (conversationId: string, turnId: string, imageId: string) => void | Promise<void>;
   onReplyToTurn?: (conversationId: string, turnId: string, aiMessage: string) => void;
-  onRegionEditReference?: (conversationId: string, referenceImage: StoredReferenceImage, instruction: string) => void;
+  onRegionEditReference?: (conversationId: string, referenceImage: StoredReferenceImage | StoredImage, instruction: string) => void | Promise<void>;
   /**
    * 单图发布到画廊。turnId + image 一起传，让父组件能拿到 turn.prompt / model / size
    * 拼成 publish 请求体。父组件用 publishState 反推每张图的状态显示。
@@ -285,11 +285,11 @@ export function ImageResults({
     if (!regionEdit || !normalized || !onRegionEditReference) {
       return;
     }
-    const instruction =
-      "局部重绘：只修改红色框选区域，保持框外产品主体、构图、颜色、比例和背景不变；修改后自然融合，不要改变未圈选区域。";
+    const percentBox = `${Math.round(normalized.x * 100)}%,${Math.round(normalized.y * 100)}%,${Math.round(normalized.width * 100)}%,${Math.round(normalized.height * 100)}%`;
+    const instruction = `局部重绘：只修改红色框选区域，保持框外产品主体、构图、颜色、比例和背景不变；修改后自然融合，不要改变未圈选区域。框选区域坐标为 x,y,w,h=${percentBox}。`;
     try {
       const dataUrl = await buildRegionReference(regionEdit.src, normalized);
-      onRegionEditReference(
+      await onRegionEditReference(
         regionEdit.conversationId,
         {
           name: `region-edit-${regionEdit.image.id}.png`,
@@ -299,13 +299,9 @@ export function ImageResults({
         instruction,
       );
     } catch {
-      onRegionEditReference(
+      await onRegionEditReference(
         regionEdit.conversationId,
-        {
-          name: `region-edit-${regionEdit.image.id}.png`,
-          type: "image/png",
-          dataUrl: regionEdit.src,
-        },
+        regionEdit.image,
         instruction,
       );
     } finally {

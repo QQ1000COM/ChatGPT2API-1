@@ -1223,7 +1223,36 @@ def _is_direct_tool_payload_text(text: str) -> bool:
     )
 
 
-def response_created(response_id: str, model: str, created: int) -> dict[str, Any]:
+def _response_request_fields(body: dict[str, Any] | None) -> dict[str, Any]:
+    body = body if isinstance(body, dict) else {}
+    fields: dict[str, Any] = {
+        "parallel_tool_calls": bool(body.get("parallel_tool_calls", False)),
+        "metadata": body.get("metadata") if isinstance(body.get("metadata"), dict) else {},
+        "tool_choice": body.get("tool_choice") if "tool_choice" in body else "auto",
+        "tools": body.get("tools") if isinstance(body.get("tools"), list) else [],
+        "instructions": body.get("instructions"),
+        "previous_response_id": body.get("previous_response_id"),
+        "store": body.get("store", True),
+        "temperature": body.get("temperature"),
+        "top_p": body.get("top_p"),
+        "max_output_tokens": body.get("max_output_tokens"),
+        "max_tool_calls": body.get("max_tool_calls"),
+        "truncation": body.get("truncation") if "truncation" in body else "disabled",
+        "reasoning": body.get("reasoning") if isinstance(body.get("reasoning"), dict) else None,
+        "service_tier": body.get("service_tier"),
+        "background": bool(body.get("background", False)),
+        "conversation": body.get("conversation"),
+        "prompt_cache_key": body.get("prompt_cache_key"),
+        "text": body.get("text") if isinstance(body.get("text"), dict) else {"format": {"type": "text"}},
+        "top_logprobs": body.get("top_logprobs"),
+        "user": body.get("user"),
+    }
+    if fields["reasoning"] is None and body.get("reasoning_effort"):
+        fields["reasoning"] = {"effort": body.get("reasoning_effort")}
+    return fields
+
+
+def response_created(response_id: str, model: str, created: int, body: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "type": "response.created",
         "response": {
@@ -1236,10 +1265,7 @@ def response_created(response_id: str, model: str, created: int) -> dict[str, An
             "model": model,
             "output": [],
             "output_text": "",
-            "parallel_tool_calls": False,
-            "metadata": {},
-            "tool_choice": "auto",
-            "tools": [],
+            **_response_request_fields(body),
         },
     }
 
@@ -1250,6 +1276,7 @@ def response_completed(
     created: int,
     output: list[dict[str, Any]],
     usage: dict[str, Any] | None = None,
+    body: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     response = {
         "type": "response.completed",
@@ -1263,10 +1290,7 @@ def response_completed(
             "model": model,
             "output": output,
             "output_text": response_output_text(output),
-            "parallel_tool_calls": False,
-            "metadata": {},
-            "tool_choice": "auto",
-            "tools": [],
+            **_response_request_fields(body),
         },
     }
     if usage:
@@ -1301,7 +1325,7 @@ def stream_text_response(backend, body: dict[str, Any], messages: list[dict[str,
     item_id = f"msg_{uuid.uuid4().hex}"
     created = int(time.time())
     full_text = ""
-    yield response_created(response_id, model, created)
+    yield response_created(response_id, model, created, body)
     yield {"type": "response.output_item.added", "output_index": 0, "item": {**text_output_item("", item_id, "in_progress"), "content": []}}
     yield {
         "type": "response.content_part.added",
@@ -1328,7 +1352,7 @@ def stream_text_response(backend, body: dict[str, Any], messages: list[dict[str,
         input_text_tokens=count_message_text_tokens(messages, model),
         output_text_tokens=count_text_tokens(full_text, model),
     )
-    yield response_completed(response_id, model, created, [item], usage)
+    yield response_completed(response_id, model, created, [item], usage, body)
 
 
 def stream_tool_response(backend, body: dict[str, Any], messages: list[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
@@ -1344,7 +1368,7 @@ def stream_tool_response(backend, body: dict[str, Any], messages: list[dict[str,
     progress_item_id = f"msg_{uuid.uuid4().hex}"
     progress_output_index = 0
     progress_started = False
-    yield response_created(response_id, model, created)
+    yield response_created(response_id, model, created, body)
     request = ConversationRequest(model=model, messages=messages)
     for delta in stream_text_deltas(backend, request):
         full_text += delta
@@ -1416,7 +1440,7 @@ def stream_tool_response(backend, body: dict[str, Any], messages: list[dict[str,
             output_text_tokens=count_text_tokens(f"{full_text}\n{item['arguments']}", model),
         )
         output = [progress_item, item] if progress_item else [item]
-        yield response_completed(response_id, model, created, output, usage)
+        yield response_completed(response_id, model, created, output, usage, body)
         return
 
     text = _normalize_codex_final_text(str(parsed.get("content") or full_text))
@@ -1425,7 +1449,7 @@ def stream_tool_response(backend, body: dict[str, Any], messages: list[dict[str,
             input_text_tokens=count_message_text_tokens(messages, model),
             output_text_tokens=count_text_tokens(text, model),
         )
-        yield response_completed(response_id, model, created, [progress_item], usage)
+        yield response_completed(response_id, model, created, [progress_item], usage, body)
         return
     item = text_output_item(text)
     yield {"type": "response.output_item.added", "output_index": 0, "item": {**text_output_item("", item["id"], "in_progress"), "content": []}}
@@ -1450,7 +1474,7 @@ def stream_tool_response(backend, body: dict[str, Any], messages: list[dict[str,
         input_text_tokens=count_message_text_tokens(messages, model),
         output_text_tokens=count_text_tokens(text, model),
     )
-    yield response_completed(response_id, model, created, [item], usage)
+    yield response_completed(response_id, model, created, [item], usage, body)
 
 
 def stream_image_response(
@@ -1460,10 +1484,11 @@ def stream_image_response(
     input_image_tokens: int = 0,
     size: object = None,
     quality: str = "auto",
+    body: dict[str, Any] | None = None,
 ) -> Iterator[dict[str, Any]]:
     response_id = f"resp_{uuid.uuid4().hex}"
     created = int(time.time())
-    yield response_created(response_id, model, created)
+    yield response_created(response_id, model, created, body)
     for output in image_outputs:
         if output.kind == "message":
             text = output.text
@@ -1491,7 +1516,7 @@ def stream_image_response(
                 "part": {"type": "output_text", "text": text, "annotations": []},
             }
             yield {"type": "response.output_item.done", "output_index": 0, "item": item}
-            yield response_completed(response_id, model, created, [item], usage)
+            yield response_completed(response_id, model, created, [item], usage, body)
             return
         if output.kind != "result":
             continue
@@ -1504,7 +1529,7 @@ def stream_image_response(
                 output_tokens=count_image_output_items_tokens(output.data, size, quality),
             )
             yield {"type": "response.output_item.done", "output_index": 0, "item": item}
-            yield response_completed(response_id, model, created, [item], usage)
+            yield response_completed(response_id, model, created, [item], usage, body)
             return
     raise RuntimeError("image generation failed")
 
@@ -1530,7 +1555,7 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
                 response_id = f"resp_{uuid.uuid4().hex}"
                 created = int(time.time())
                 item = function_call_item(str(forced_tool_call.get("name") or ""), forced_tool_call.get("arguments") or {})
-                yield response_created(response_id, model, created)
+                yield response_created(response_id, model, created, body)
                 yield {"type": "response.output_item.added", "output_index": 0, "item": {**item, "status": "in_progress", "arguments": ""}}
                 yield {"type": "response.function_call_arguments.delta", "item_id": item["id"], "output_index": 0, "delta": item["arguments"]}
                 yield {"type": "response.function_call_arguments.done", "item_id": item["id"], "output_index": 0, "arguments": item["arguments"]}
@@ -1539,7 +1564,7 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
                     input_text_tokens=count_message_text_tokens(messages, model),
                     output_text_tokens=count_text_tokens(item["arguments"], model),
                 )
-                yield response_completed(response_id, model, created, [item], usage)
+                yield response_completed(response_id, model, created, [item], usage, body)
                 return
             item = function_call_item(str(forced_tool_call.get("name") or ""), forced_tool_call.get("arguments") or {})
             usage = token_usage(
@@ -1552,6 +1577,7 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
                 int(time.time()),
                 [item],
                 usage,
+                body,
             )
             return
         yield from chat_completion_cache.get_or_compute_stream(
@@ -1589,7 +1615,7 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         response_format="b64_json",
         images=images,
     ))
-    yield from stream_image_response(image_outputs, prompt, model, input_image_tokens, tool.get("size"), str(tool.get("quality") or "auto"))
+    yield from stream_image_response(image_outputs, prompt, model, input_image_tokens, tool.get("size"), str(tool.get("quality") or "auto"), body)
 
 
 def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:

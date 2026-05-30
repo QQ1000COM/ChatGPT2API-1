@@ -122,6 +122,9 @@ function readFileAsDataUrl(file: File) {
 }
 
 function dataUrlToFile(dataUrl: string, fileName: string, mimeType?: string) {
+  if (!/^data:[^,]+;base64,/.test(dataUrl)) {
+    throw new Error("参考图数据无效，请重新打开图片后再试");
+  }
   const [header, content] = dataUrl.split(",", 2);
   const matchedMimeType = header.match(/data:(.*?);base64/)?.[1];
   const binary = atob(content || "");
@@ -1160,19 +1163,31 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   );
 
   const handleRegionEditReference = useCallback(
-    (conversationId: string, referenceImage: StoredReferenceImage, instruction: string) => {
-      setSelectedConversationId(conversationId);
-      setReferenceImages((prev) => [...prev, referenceImage]);
-      setReferenceImageFiles((prev) => [
-        ...prev,
-        dataUrlToFile(referenceImage.dataUrl, referenceImage.name, referenceImage.type),
-      ]);
-      setImagePrompt((current) => {
-        const trimmed = current.trim();
-        return trimmed ? `${trimmed}\n\n${instruction}` : instruction;
-      });
-      textareaRef.current?.focus();
-      toast.success("已加入局部重绘参考图，可继续补充修改要求");
+    async (conversationId: string, referenceImage: StoredReferenceImage | StoredImage, instruction: string) => {
+      try {
+        const nextReference =
+          "dataUrl" in referenceImage
+            ? {
+                referenceImage,
+                file: dataUrlToFile(referenceImage.dataUrl, referenceImage.name, referenceImage.type),
+              }
+            : await buildReferenceImageFromStoredImage(referenceImage, `region-edit-${referenceImage.id || Date.now()}.png`);
+        if (!nextReference) {
+          throw new Error("没有可用于局部重绘的参考图，请重新打开图片后再试");
+        }
+        setSelectedConversationId(conversationId);
+        setReferenceImages((prev) => [...prev, nextReference.referenceImage]);
+        setReferenceImageFiles((prev) => [...prev, nextReference.file]);
+        setImagePrompt((current) => {
+          const trimmed = current.trim();
+          return trimmed ? `${trimmed}\n\n${instruction}` : instruction;
+        });
+        textareaRef.current?.focus();
+        toast.success("已加入局部重绘参考图，可继续补充修改要求");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "局部重绘参考图读取失败";
+        toast.error(`${message}，请联系管理员解决`);
+      }
     },
     [],
   );

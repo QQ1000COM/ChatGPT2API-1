@@ -55,6 +55,13 @@ def _timestamp(value: object) -> float:
         return 0.0
 
 
+def _stale_unfinished_seconds() -> int:
+    try:
+        return max(180, int(config.image_poll_timeout_secs) * 3)
+    except Exception:
+        return 360
+
+
 def _clean(value: object, default: str = "") -> str:
     return str(value or default).strip()
 
@@ -279,7 +286,10 @@ class ImageTaskService:
         owner = _owner_id(identity)
         requested_ids = [_clean(task_id) for task_id in task_ids if _clean(task_id)]
         with self._lock:
+            changed = self._mark_stale_unfinished_locked()
             if self._cleanup_locked():
+                changed = True
+            if changed:
                 self._save_locked()
             items = []
             missing_ids = []
@@ -825,6 +835,21 @@ class ImageTaskService:
                 task["error"] = "服务已重启，未完成的图片任务已中断"
                 task["updated_at"] = _now_iso()
                 changed = True
+        return changed
+
+    def _mark_stale_unfinished_locked(self) -> bool:
+        changed = False
+        cutoff = time.time() - _stale_unfinished_seconds()
+        for task in self._tasks.values():
+            if task.get("status") not in UNFINISHED_STATUSES:
+                continue
+            updated_at = _timestamp(task.get("updated_at") or task.get("created_at"))
+            if updated_at <= 0 or updated_at >= cutoff:
+                continue
+            task["status"] = TASK_STATUS_ERROR
+            task["error"] = "图片任务超时未完成，已自动标记失败，请联系管理员检查账号、额度或上游服务状态"
+            task["updated_at"] = _now_iso()
+            changed = True
         return changed
 
     def _cleanup_locked(self) -> bool:

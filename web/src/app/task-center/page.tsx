@@ -21,15 +21,19 @@ export default function TaskCenterPage() {
   const [items, setItems] = useState<ImageTask[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  const load = async () => {
-    setIsLoading(true);
+  const load = async (showLoading = true) => {
+    if (showLoading) {
+      setIsLoading(true);
+    }
     try {
       const data = await fetchImageTasks([]);
       setItems(data.items || []);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载任务失败");
     } finally {
-      setIsLoading(false);
+      if (showLoading) {
+        setIsLoading(false);
+      }
     }
   };
 
@@ -47,6 +51,16 @@ export default function TaskCenterPage() {
     if (!session) return;
     void load();
   }, [session]);
+
+  useEffect(() => {
+    if (!session) return;
+    const hasActiveTasks = items.some((item) => item.status === "running" || item.status === "queued");
+    if (!hasActiveTasks) return;
+    const timer = window.setInterval(() => {
+      void load(false);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [items, session]);
 
   const stats = useMemo(() => ({
     total: items.length,

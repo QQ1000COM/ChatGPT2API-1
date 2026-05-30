@@ -51,11 +51,24 @@ class ResponseCreateRequest(BaseModel):
     input: object | None = None
     instructions: object | None = None
     previous_response_id: str | None = None
+    metadata: dict[str, object] | None = None
+    store: bool | None = None
     reasoning: dict[str, object] | None = None
     reasoning_effort: str | None = None
     prompt_cache_key: str | None = None
     tools: list[dict[str, object]] | None = None
     tool_choice: object | None = None
+    parallel_tool_calls: bool | None = None
+    temperature: float | None = None
+    top_p: float | None = None
+    max_output_tokens: int | None = None
+    max_tool_calls: int | None = None
+    truncation: str | None = None
+    text: dict[str, object] | None = None
+    service_tier: str | None = None
+    background: bool | None = None
+    conversation: object | None = None
+    user: str | None = None
     stream: bool | None = None
 
 
