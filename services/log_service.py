@@ -30,6 +30,23 @@ LOG_TOKEN_PRICING = {
     "gpt-5-nano": {"input": 0.05, "cached_input": 0.005, "output": 0.4},
 }
 
+CODEX_LOG_TOOL_NAMES = {
+    "shell_command",
+    "exec_command",
+    "local_shell",
+    "shell",
+    "run_command",
+    "terminal",
+    "apply_patch",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "run_tests",
+}
+CODEX_LOG_READ_TOOLS = {"read_file", "open_file", "view_file"}
+CODEX_LOG_EDIT_TOOLS = {"apply_patch", "write_file", "edit_file"}
+CODEX_LOG_TEST_TOOLS = {"run_tests", "test", "pytest", "npm_test"}
+
 
 class LogService:
     def __init__(self, path: Path):
@@ -209,6 +226,58 @@ def _estimated_cost(model: str, usage: dict[str, Any]) -> float:
     return round(cost, 6)
 
 
+def _tool_calls_from_result(result: object) -> list[dict[str, Any]]:
+    if not isinstance(result, dict):
+        return []
+    output = result.get("output")
+    if not isinstance(output, list):
+        return []
+    calls: list[dict[str, Any]] = []
+    for item in output:
+        if not isinstance(item, dict) or str(item.get("type") or "") != "function_call":
+            continue
+        calls.append({
+            "name": str(item.get("name") or ""),
+            "arguments": item.get("arguments"),
+            "call_id": item.get("call_id"),
+        })
+    return calls
+
+
+def _is_codex_log_call(endpoint: str, model: str, tool_calls: list[dict[str, Any]]) -> bool:
+    normalized_model = str(model or "").lower()
+    normalized_endpoint = str(endpoint or "").lower()
+    if "codex" in normalized_model and "responses" in normalized_endpoint:
+        return True
+    for call in tool_calls:
+        name = str(call.get("name") or "").strip().lower()
+        if name in CODEX_LOG_TOOL_NAMES:
+            return True
+    return False
+
+
+def _codex_phase_from_tool_calls(tool_calls: list[dict[str, Any]]) -> str:
+    if not tool_calls:
+        return ""
+    last_name = str(tool_calls[-1].get("name") or "").strip().lower()
+    if last_name in CODEX_LOG_TEST_TOOLS:
+        return "run_tests"
+    if last_name in CODEX_LOG_EDIT_TOOLS:
+        return "edit_source"
+    if last_name in CODEX_LOG_READ_TOOLS:
+        return "locate_files"
+    if last_name in {"shell_command", "exec_command", "local_shell", "shell", "run_command", "terminal"}:
+        args = str(tool_calls[-1].get("arguments") or "").lower()
+        if "test" in args or "pytest" in args or "npm run build" in args or "go test" in args:
+            return "run_tests"
+        if "git diff" in args or "apply_patch" in args:
+            return "edit_source"
+        if "rg --files" in args or "get-content" in args or "rg -n" in args:
+            return "locate_files"
+        return "scan_repo"
+    return "tool_call"
+
+
 def _image_error_response(exc: Exception) -> JSONResponse:
     message = str(exc)
     if "no available image quota" in message.lower():
@@ -376,6 +445,7 @@ class LoggedCall:
             urls: list[str] | None = None) -> None:
         result_model = str(result.get("model") or "") if isinstance(result, dict) else ""
         model = result_model or self.model
+        tool_calls = _tool_calls_from_result(result)
         detail = {
             "key_id": self.identity.get("id"),
             "key_name": self.identity.get("name"),
@@ -388,6 +458,15 @@ class LoggedCall:
             "duration_ms": int((time.time() - self.started) * 1000),
             "status": status,
         }
+        if tool_calls:
+            detail["tool_calls"] = tool_calls
+            detail["tool_call_count"] = len(tool_calls)
+        codex_mode = _is_codex_log_call(self.endpoint, model, tool_calls)
+        if codex_mode:
+            detail["codex_mode"] = True
+            codex_phase = _codex_phase_from_tool_calls(tool_calls)
+            if codex_phase:
+                detail["codex_phase"] = codex_phase
         usage = _usage_from_result(result)
         if usage:
             detail.update(usage)

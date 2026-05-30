@@ -62,6 +62,26 @@ def test_responses_function_call_stream(monkeypatch):
     assert completed["response"]["output"][0]["type"] == "function_call"
 
 
+def test_responses_codex_model_uses_dedicated_prompt(monkeypatch):
+    seen = {}
+
+    def fake_stream_text_deltas(_backend, request):
+        seen["messages"] = request.messages
+        return iter(['{"type":"function_call","name":"shell_command","arguments":{"command":"git status --short"}}'])
+
+    monkeypatch.setattr(openai_v1_response, "stream_text_deltas", fake_stream_text_deltas)
+    monkeypatch.setattr(openai_v1_response, "text_backend", lambda: object())
+
+    response = openai_v1_response.handle({
+        "model": "gpt-5.1-codex",
+        "input": "show cwd",
+        "tools": [{"type": "function", "name": "shell_command"}],
+    })
+
+    assert isinstance(response, dict)
+    assert "Codex mode: true" in seen["messages"][0]["content"]
+
+
 def test_responses_codex_command_block_becomes_shell_call(monkeypatch):
     monkeypatch.setattr(
         openai_v1_response,
@@ -91,6 +111,38 @@ def test_responses_codex_command_block_becomes_shell_call(monkeypatch):
     assert item["type"] == "function_call"
     assert item["name"] == "shell_command"
     assert '"command": "git status --short"' in item["arguments"]
+
+
+def test_responses_codex_patch_text_becomes_apply_patch_call(monkeypatch):
+    monkeypatch.setattr(
+        openai_v1_response,
+        "stream_text_deltas",
+        lambda backend, request: iter([
+            "Applying this patch:\n*** Begin Patch\n*** Update File: a.py\n@@\n-pass\n+print('ok')\n*** End Patch"
+        ]),
+    )
+    monkeypatch.setattr(openai_v1_response, "text_backend", lambda: object())
+
+    response = openai_v1_response.handle({
+        "model": "gpt-5.1-codex",
+        "input": "edit file",
+        "tools": [{
+            "type": "function",
+            "name": "apply_patch",
+            "parameters": {
+                "type": "object",
+                "properties": {"patch": {"type": "string"}},
+                "required": ["patch"],
+            },
+        }],
+    })
+
+    assert isinstance(response, dict)
+    item = response["output"][0]
+    assert item["type"] == "function_call"
+    assert item["name"] == "apply_patch"
+    assert "*** Begin Patch" in item["arguments"]
+    assert "*** End Patch" in item["arguments"]
 
 
 def test_responses_codex_action_request_gets_initial_shell_call(monkeypatch):
@@ -308,6 +360,103 @@ def test_responses_codex_chinese_analysis_question_keeps_repairing(monkeypatch):
     assert item["name"] == "shell_command"
     assert "backend/modules/proxy/config_generator.go" in item["arguments"]
     assert "Get-Content" in item["arguments"]
+
+
+def test_responses_codex_read_file_tool_is_used_for_located_file(monkeypatch):
+    monkeypatch.setattr(
+        openai_v1_response,
+        "stream_text_deltas",
+        lambda backend, request: iter(["Should I modify backend/modules/proxy/config_generator.go next?"]),
+    )
+    monkeypatch.setattr(openai_v1_response, "text_backend", lambda: object())
+
+    response = openai_v1_response.handle({
+        "model": "gpt-5.1-codex",
+        "input": [{
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "backend/modules/proxy/config_generator.go:466: dns config\n",
+        }],
+        "_previous_input_items": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "fix the proxy generator bug"}],
+        }],
+        "tools": [{
+            "type": "function",
+            "name": "read_file",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        }],
+    })
+
+    assert isinstance(response, dict)
+    item = response["output"][0]
+    assert item["type"] == "function_call"
+    assert item["name"] == "read_file"
+    assert "backend/modules/proxy/config_generator.go" in item["arguments"]
+
+
+def test_responses_codex_runs_tests_after_edit_even_if_model_says_done(monkeypatch):
+    monkeypatch.setattr(openai_v1_response, "stream_text_deltas", lambda backend, request: iter(["Done."]))
+    monkeypatch.setattr(openai_v1_response, "text_backend", lambda: object())
+
+    response = openai_v1_response.handle({
+        "model": "gpt-5.1-codex",
+        "input": [{
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "patch applied",
+        }],
+        "_previous_input_items": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "fix the responses codex task execution bug"}],
+        }],
+        "_previous_response": {
+            "output": [{
+                "type": "function_call",
+                "name": "apply_patch",
+                "arguments": "{\"patch\":\"*** Begin Patch\"}",
+            }],
+        },
+        "tools": [{"type": "function", "name": "run_tests"}],
+    })
+
+    assert isinstance(response, dict)
+    item = response["output"][0]
+    assert item["type"] == "function_call"
+    assert item["name"] == "run_tests"
+    assert "pytest" in item["arguments"] or "npm run build" in item["arguments"]
+
+
+def test_responses_codex_failure_output_recovers_with_tool_call(monkeypatch):
+    monkeypatch.setattr(openai_v1_response, "stream_text_deltas", lambda backend, request: iter(["Done."]))
+    monkeypatch.setattr(openai_v1_response, "text_backend", lambda: object())
+
+    response = openai_v1_response.handle({
+        "model": "gpt-5.1-codex",
+        "input": [{
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "Traceback: test failed in services/protocol/openai_v1_response.py",
+        }],
+        "_previous_input_items": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "fix the responses codex task execution bug"}],
+        }],
+        "tools": [{"type": "function", "name": "shell_command"}],
+    })
+
+    assert isinstance(response, dict)
+    item = response["output"][0]
+    assert item["type"] == "function_call"
+    assert item["name"] == "shell_command"
+    assert "git diff" in item["arguments"]
 
 
 def test_responses_function_output_followup(monkeypatch):

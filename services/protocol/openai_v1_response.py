@@ -33,7 +33,6 @@ TOOL_CALL_SYSTEM_MESSAGE = """
 你不能自己执行本地工具，只能请求客户端执行工具调用。
 You cannot execute local tools yourself; only request tool calls for the client to execute.
 当用户要求修复、实现、检查、升级、部署、运行测试、推送，或处理项目内任务时，必须优先请求可用工具调用，不要停在说明、确认或英文计划。
-如果用户要求“修复源码/修复错误/实现功能”，你必须按“定位 -> 修改文件 -> 运行测试/验证”的顺序推进；读取或扫描目录只是中间步骤，不能把“是否要我修改/是否需要建议”作为最终回答。
 工具返回结果后，如果任务还没有真正完成，必须继续请求下一个工具调用，不要把中间状态当成最终回答。
 需要仓库上下文时，先调用 shell/command 类工具。
 每次最多请求一个工具调用。
@@ -44,10 +43,38 @@ You cannot execute local tools yourself; only request tool calls for the client 
 不要声称自己已经执行工具；必须等 function_call_output 返回后再基于结果继续。
 """.strip()
 
+CODEX_TOOL_CALL_SYSTEM_MESSAGE = TOOL_CALL_SYSTEM_MESSAGE + """
+
+Codex mode: true
+Codex 专用执行规则：
+1. 用户要求修复源码、修复错误、实现功能、升级代码、部署或测试时，必须按“扫描仓库 -> 定位文件 -> 修改源码 -> 运行测试/验证 -> 中文总结”推进。
+2. 读取文件、扫描目录、差异分析都只是中间步骤；不能把“你是想分析，还是要我修改”“是否需要建议”“我可以继续”作为最终回答。
+3. 如果可用工具包含 apply_patch、write_file、edit_file，应在定位到具体改动后使用编辑工具；如果只有 shell/exec/local_shell，则继续用命令读取文件、生成补丁或运行测试。
+4. 只有确认已经修改文件并完成必要验证后，才可以给最终中文总结。未修改源码、未验证、工具失败、连接中断、上游报错，都必须继续请求工具调用。
+5. 每轮最多请求一个工具；不要输出 Markdown 计划替代工具调用。
+""".strip()
+
 CODEX_UPSTREAM_MAX_CHARS = 42000
 CODEX_UPSTREAM_MAX_MESSAGE_CHARS = 14000
 CODEX_UPSTREAM_KEEP_LAST_MESSAGES = 8
 SHELL_TOOL_NAME_HINTS = ("shell", "exec", "command", "terminal", "powershell", "bash", "run")
+CODEX_MODEL_HINTS = ("codex", "gpt-5.1-codex", "codex-mini")
+CODEX_TOOL_NAMES = {
+    "shell_command",
+    "exec_command",
+    "local_shell",
+    "shell",
+    "run_command",
+    "terminal",
+    "apply_patch",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "run_tests",
+}
+READ_TOOL_NAMES = {"read_file", "open_file", "view_file"}
+EDIT_TOOL_NAMES = {"apply_patch", "write_file", "edit_file"}
+TEST_TOOL_NAMES = {"run_tests", "test", "pytest", "npm_test"}
 ACTION_REQUEST_RE = re.compile(
     r"(帮我|处理|修复|实现|新增|添加|升级|同步|部署|推送|测试|运行|查看|检查|改成|优化|继续|"
     r"开始|执行|接着|搞定|完成|全部|直接|别问|不要问|不需要问|自动|"
@@ -113,6 +140,24 @@ def response_function_tools(body: dict[str, Any]) -> list[dict[str, Any]]:
         for tool in tools
         if isinstance(tool, dict) and str(tool.get("type") or "").strip() != "image_generation"
     ]
+
+
+def _is_codex_model(model: object) -> bool:
+    value = str(model or "").strip().lower()
+    return any(hint in value for hint in CODEX_MODEL_HINTS)
+
+
+def _is_codex_tool_request(model: object, tools: list[dict[str, Any]]) -> bool:
+    if _is_codex_model(model):
+        return True
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        name = _tool_name(tool).lower()
+        identity = _tool_identity(tool)
+        if name in CODEX_TOOL_NAMES or any(tool_name in identity for tool_name in CODEX_TOOL_NAMES):
+            return True
+    return False
 
 
 def response_image_tool(body: dict[str, Any]) -> dict[str, object]:
@@ -493,6 +538,64 @@ def _find_shell_tool(tools: list[dict[str, Any]]) -> dict[str, Any] | None:
     return None
 
 
+def _find_named_tool(tools: list[dict[str, Any]], names: set[str]) -> dict[str, Any] | None:
+    named_tools = [(tool, _tool_name(tool).lower(), _tool_identity(tool)) for tool in tools if isinstance(tool, dict)]
+    for tool, name, identity in named_tools:
+        if name in names or str(tool.get("type") or "").strip().lower() in names:
+            return tool
+        if any(tool_name in identity for tool_name in names):
+            return tool
+    return None
+
+
+def _tool_argument_for_path(tool: dict[str, Any], path: str) -> dict[str, Any]:
+    parameters = _tool_parameters(tool)
+    properties = parameters.get("properties") if isinstance(parameters.get("properties"), dict) else {}
+    prop_names = {str(key) for key in properties.keys()}
+    if "path" in prop_names or not prop_names:
+        return {"path": path}
+    if "file_path" in prop_names:
+        return {"file_path": path}
+    if "filename" in prop_names:
+        return {"filename": path}
+    if "input" in prop_names:
+        return {"input": path}
+    first = next(iter(prop_names), "path")
+    return {first: path}
+
+
+def _tool_argument_for_tests(tool: dict[str, Any], command: str) -> dict[str, Any]:
+    parameters = _tool_parameters(tool)
+    properties = parameters.get("properties") if isinstance(parameters.get("properties"), dict) else {}
+    prop_names = {str(key) for key in properties.keys()}
+    if "command" in prop_names or not prop_names:
+        return {"command": command}
+    if "cmd" in prop_names:
+        return {"cmd": command}
+    if "pattern" in prop_names:
+        return {"pattern": command}
+    if "input" in prop_names:
+        return {"input": command}
+    first = next(iter(prop_names), "command")
+    return {first: command}
+
+
+def _tool_argument_for_patch(tool: dict[str, Any], patch: str) -> dict[str, Any]:
+    parameters = _tool_parameters(tool)
+    properties = parameters.get("properties") if isinstance(parameters.get("properties"), dict) else {}
+    prop_names = {str(key) for key in properties.keys()}
+    if "patch" in prop_names or not prop_names:
+        return {"patch": patch}
+    if "diff" in prop_names:
+        return {"diff": patch}
+    if "content" in prop_names:
+        return {"content": patch}
+    if "input" in prop_names:
+        return {"input": patch}
+    first = next(iter(prop_names), "patch")
+    return {first: patch}
+
+
 def _extract_fenced_command(text: str) -> str:
     for match in FENCED_COMMAND_RE.finditer(str(text or "")):
         lines: list[str] = []
@@ -509,6 +612,17 @@ def _extract_fenced_command(text: str) -> str:
         if command:
             return command
     return ""
+
+
+def _extract_patch_text(text: str) -> str:
+    value = str(text or "")
+    start = value.find("*** Begin Patch")
+    end = value.find("*** End Patch")
+    if start < 0:
+        return ""
+    if end >= 0:
+        return value[start : end + len("*** End Patch")].strip()
+    return value[start:].strip()
 
 
 def _tool_argument_for_command(tool: dict[str, Any], command: str) -> dict[str, Any]:
@@ -616,6 +730,86 @@ def _has_project_task(messages: list[dict[str, Any]] | None) -> bool:
     return False
 
 
+def _assistant_texts(messages: list[dict[str, Any]] | None) -> list[str]:
+    if not messages:
+        return []
+    texts: list[str] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("role") or "").strip() != "assistant":
+            continue
+        text = str(message.get("content") or "").strip()
+        if text:
+            texts.append(text)
+    return texts
+
+
+def _messages_are_codex_mode(messages: list[dict[str, Any]] | None) -> bool:
+    if not messages:
+        return False
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("role") or "").strip() != "system":
+            continue
+        if "Codex mode: true" in str(message.get("content") or ""):
+            return True
+    return False
+
+
+def _has_edit_attempt(messages: list[dict[str, Any]] | None) -> bool:
+    text = "\n".join(_assistant_texts(messages)).lower()
+    return any(name in text for name in EDIT_TOOL_NAMES) or any(
+        marker in text for marker in ["*** begin patch", "apply_patch", "write_file", "edit_file"]
+    )
+
+
+def _has_test_attempt(messages: list[dict[str, Any]] | None) -> bool:
+    text = "\n".join(_assistant_texts(messages) + _user_texts(messages)).lower()
+    return any(name in text for name in TEST_TOOL_NAMES) or any(marker in text for marker in ["pytest", "npm run build", "tsc", "go test", "cargo test"])
+
+
+def _has_failure_output(messages: list[dict[str, Any]] | None) -> bool:
+    for text in _user_texts(messages):
+        if "Tool output for call_id" not in text:
+            continue
+        value = text.lower()
+        if any(
+            marker in value
+            for marker in [
+                "traceback",
+                "error:",
+                "command failed",
+                "failed",
+                "exception",
+                "exit code",
+                "non-zero",
+                "connection reset",
+                "timeout",
+                "\u5931\u8d25",
+                "\u62a5\u9519",
+                "\u9519\u8bef",
+            ]
+        ):
+            return True
+    return False
+
+
+def _codex_task_phase(messages: list[dict[str, Any]] | None, model_text: str = "") -> str:
+    if not _has_tool_output(messages):
+        return "scan_repo"
+    if _has_failure_output(messages):
+        return "recover_failure"
+    if _has_edit_attempt(messages) and not _has_test_attempt(messages):
+        return "run_tests"
+    if _has_edit_attempt(messages) and _has_test_attempt(messages):
+        return "summarize"
+    if _mentioned_source_files(f"{' '.join(_user_texts(messages))}\n{model_text}"):
+        return "edit_source"
+    return "locate_files"
+
+
 def _is_completion_text(text: str) -> bool:
     return COMPLETION_TEXT_RE.search(str(text or "")) is not None
 
@@ -641,10 +835,20 @@ def _is_kickoff_text(text: str) -> bool:
 
 def _fallback_tool_call_from_text(text: str, tools: list[dict[str, Any]], messages: list[dict[str, Any]] | None) -> dict[str, Any] | None:
     shell_tool = _find_shell_tool(tools)
-    if not shell_tool:
+    read_tool = _find_named_tool(tools, READ_TOOL_NAMES)
+    test_tool = _find_named_tool(tools, TEST_TOOL_NAMES)
+    edit_tool = _find_named_tool(tools, EDIT_TOOL_NAMES)
+    if not shell_tool and not read_tool and not test_tool and not edit_tool:
         return None
+    patch = _extract_patch_text(text)
+    if patch and edit_tool:
+        return {
+            "type": "function_call",
+            "name": _tool_name(edit_tool),
+            "arguments": _tool_argument_for_patch(edit_tool, patch),
+        }
     command = _extract_fenced_command(text)
-    if command:
+    if command and shell_tool:
         return {
             "type": "function_call",
             "name": _tool_name(shell_tool),
@@ -662,24 +866,23 @@ def _fallback_tool_call_from_text(text: str, tools: list[dict[str, Any]], messag
     english_intermediate = bool(task_can_continue and text.strip() and not CJK_RE.search(text) and not is_completion)
     should_start = bool(latest_user and ACTION_REQUEST_RE.search(latest_user))
     should_recover_from_question = bool(asks_for_confirmation and project_task)
+    codex_mode = _messages_are_codex_mode(messages)
+    phase = _codex_task_phase(messages, text) if codex_mode else ""
+    must_continue_phase = phase in {"recover_failure", "run_tests", "edit_source", "locate_files"}
     if should_start and (not _has_tool_output(messages) or latest_user.strip() in {"开始", "继续", "继续执行", "接着", "直接执行"}):
+        if not shell_tool:
+            return None
         return {
             "type": "function_call",
             "name": _tool_name(shell_tool),
             "arguments": _tool_argument_for_command(shell_tool, _initial_codex_command(user_text or latest_user)),
         }
-    if should_recover_from_question:
-        return {
-            "type": "function_call",
-            "name": _tool_name(shell_tool),
-            "arguments": _tool_argument_for_command(shell_tool, _next_codex_command(user_text, text)),
-        }
+    if codex_mode and should_recover_from_question:
+        return _next_codex_tool_call(tools, messages, user_text, text)
+    if codex_mode and task_can_continue and must_continue_phase:
+        return _next_codex_tool_call(tools, messages, user_text, text)
     if task_can_continue and not is_completion and (looks_like_progress or english_intermediate):
-        return {
-            "type": "function_call",
-            "name": _tool_name(shell_tool),
-            "arguments": _tool_argument_for_command(shell_tool, _next_codex_command(user_text, text)),
-        }
+        return _next_codex_tool_call(tools, messages, user_text, text)
     return None
 
 
@@ -703,6 +906,101 @@ def _next_codex_command(task_text: str, model_text: str = "") -> str:
         file_args = " ".join(target_files[:4])
         return f'git status --short; rg -n "TODO|FIXME|error|错误|legacy|deprecated|DNS|dns|outbound|route|sing-box|fake-ip|special" {file_args}; Get-Content -Encoding utf8 {target_files[0]} | Select-Object -First 260'
     return "git status --short; rg --files | Select-Object -First 120"
+
+
+def _codex_test_command() -> str:
+    return (
+        "git status --short; "
+        "if (Test-Path package.json) { npm test -- --runInBand }; "
+        "if (Test-Path web\\package.json) { Push-Location web; npm run build; Pop-Location }; "
+        "if (Test-Path pyproject.toml) { .venv\\Scripts\\python.exe -m pytest -q }; "
+        "if (Test-Path pytest.ini) { .venv\\Scripts\\python.exe -m pytest -q }; "
+        "if (Test-Path go.mod) { go test ./... }"
+    )
+
+
+def _codex_recovery_command(task_text: str, model_text: str = "") -> str:
+    target_files = _mentioned_source_files(f"{task_text}\n{model_text}")
+    file_args = " ".join(target_files[:4])
+    if file_args:
+        return f"git status --short; git diff --stat; git diff -- {file_args}; rg -n \"error|failed|exception|Traceback|TODO|FIXME\" {file_args}"
+    return "git status --short; git diff --stat; git diff; rg -n \"error|failed|exception|Traceback|TODO|FIXME\" ."
+
+
+def _next_codex_tool_call(
+    tools: list[dict[str, Any]],
+    messages: list[dict[str, Any]] | None,
+    task_text: str,
+    model_text: str = "",
+) -> dict[str, Any] | None:
+    shell_tool = _find_shell_tool(tools)
+    read_tool = _find_named_tool(tools, READ_TOOL_NAMES)
+    test_tool = _find_named_tool(tools, TEST_TOOL_NAMES)
+    phase = _codex_task_phase(messages, model_text)
+    target_files = _mentioned_source_files(f"{task_text}\n{model_text}\n{' '.join(_user_texts(messages))}")
+
+    if phase == "run_tests":
+        command = _codex_test_command()
+        if test_tool:
+            return {
+                "type": "function_call",
+                "name": _tool_name(test_tool),
+                "arguments": _tool_argument_for_tests(test_tool, command),
+            }
+        if shell_tool:
+            return {
+                "type": "function_call",
+                "name": _tool_name(shell_tool),
+                "arguments": _tool_argument_for_command(shell_tool, command),
+            }
+
+    if phase == "recover_failure":
+        if shell_tool:
+            return {
+                "type": "function_call",
+                "name": _tool_name(shell_tool),
+                "arguments": _tool_argument_for_command(shell_tool, _codex_recovery_command(task_text, model_text)),
+            }
+        if read_tool and target_files:
+            return {
+                "type": "function_call",
+                "name": _tool_name(read_tool),
+                "arguments": _tool_argument_for_path(read_tool, target_files[0]),
+            }
+
+    if phase in {"edit_source", "locate_files"}:
+        if read_tool and target_files:
+            return {
+                "type": "function_call",
+                "name": _tool_name(read_tool),
+                "arguments": _tool_argument_for_path(read_tool, target_files[0]),
+            }
+        if shell_tool:
+            return {
+                "type": "function_call",
+                "name": _tool_name(shell_tool),
+                "arguments": _tool_argument_for_command(shell_tool, _next_codex_command(task_text, model_text)),
+            }
+
+    if shell_tool:
+        return {
+            "type": "function_call",
+            "name": _tool_name(shell_tool),
+            "arguments": _tool_argument_for_command(shell_tool, _next_codex_command(task_text, model_text)),
+        }
+    if read_tool and target_files:
+        return {
+            "type": "function_call",
+            "name": _tool_name(read_tool),
+            "arguments": _tool_argument_for_path(read_tool, target_files[0]),
+        }
+    if test_tool:
+        return {
+            "type": "function_call",
+            "name": _tool_name(test_tool),
+            "arguments": _tool_argument_for_tests(test_tool, _codex_test_command()),
+        }
+    return None
 
 
 def _mentioned_source_files(text: str) -> list[str]:
@@ -747,7 +1045,7 @@ def tool_messages_from_body(body: dict[str, Any]) -> tuple[str, list[dict[str, A
     instructions = str(body.get("instructions") or "").strip()
     tools = response_function_tools(body)
     tool_choice = body.get("tool_choice")
-    tool_prompt = TOOL_CALL_SYSTEM_MESSAGE
+    tool_prompt = CODEX_TOOL_CALL_SYSTEM_MESSAGE if _is_codex_tool_request(model, tools) else TOOL_CALL_SYSTEM_MESSAGE
     if tools:
         tool_prompt += "\n\nAvailable tools JSON:\n" + json.dumps(tools, ensure_ascii=False)
     if tool_choice:
