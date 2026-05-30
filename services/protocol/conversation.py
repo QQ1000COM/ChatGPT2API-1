@@ -17,6 +17,7 @@ from services.openai_backend_api import OpenAIBackendAPI
 from services.remote_storage_service import RemoteStorageError, upload_image_bytes
 from services.remote_image_index_service import upsert_remote_image
 from utils.helper import IMAGE_MODELS, extract_image_from_message_content
+from utils.image_tokens import count_image_content_tokens
 from utils.log import logger
 
 
@@ -168,7 +169,11 @@ def assistant_history_messages(messages: list[dict[str, Any]]) -> list[str]:
     return [str(item.get("content") or "") for item in messages if item.get("role") == "assistant" and item.get("content")]
 
 
-def build_image_prompt(prompt: str, size: str | None) -> str:
+def build_image_prompt(prompt: str, size: str | None, quality: str = "auto") -> str:
+    if not size and not quality:
+        return prompt
+    if quality and quality != "auto":
+        prompt = f"{prompt.strip()}\n\n输出图片质量为 {quality}。"
     if not size:
         return prompt
     if size not in {"1:1", "16:9", "9:16", "4:3", "3:4"}:
@@ -194,14 +199,25 @@ def encoding_for_model(model: str):
 
 
 def count_message_tokens(messages: list[dict[str, Any]], model: str) -> int:
+    return count_message_text_tokens(messages, model) + count_message_image_tokens(messages, model)
+
+
+def count_message_image_tokens(messages: list[dict[str, Any]], model: str) -> int:
+    return sum(count_image_content_tokens(message.get("content"), model) for message in messages)
+
+
+def count_message_text_tokens(messages: list[dict[str, Any]], model: str) -> int:
     encoding = encoding_for_model(model)
     total = 0
     for message in messages:
         total += 3
         for key, value in message.items():
-            if not isinstance(value, str):
+            if key == "content" and isinstance(value, list):
+                total += len(encoding.encode(message_text(value)))
+            elif isinstance(value, str):
+                total += len(encoding.encode(value))
+            else:
                 continue
-            total += len(encoding.encode(value))
             if key == "name":
                 total += 1
     return total + 3
@@ -253,6 +269,7 @@ class ConversationRequest:
     images: list[str] | None = None
     n: int = 1
     size: str | None = None
+    quality: str = "auto"
     response_format: str = "b64_json"
     base_url: str | None = None
     message_as_error: bool = False
@@ -260,6 +277,7 @@ class ConversationRequest:
 
 @dataclass
 class ConversationState:
+    raw_text: str = ""
     text: str = ""
     conversation_id: str = ""
     file_ids: list[str] = field(default_factory=list)
@@ -322,6 +340,43 @@ def strip_history(text: str, history_text: str = "") -> str:
     while history_text and text.startswith(history_text):
         text = text[len(history_text):]
     return text
+
+
+ANNOTATION_START = "\ue200"
+ANNOTATION_SEP = "\ue202"
+ANNOTATION_END = "\ue201"
+
+
+def _sanitize_annotation(parts: list[str]) -> str:
+    annotation_type = parts[0] if parts else ""
+    if annotation_type == "url":
+        label = parts[1] if len(parts) > 1 else ""
+        url = parts[2] if len(parts) > 2 else ""
+        if url and not re.match(r"^[a-z][a-z0-9+.-]*://", url, flags=re.IGNORECASE):
+            return label or url
+        return f"{label} ({url})" if label and url and url != label else label or url
+    if annotation_type == "cite":
+        return ""
+    return "".join(parts[1:]) if len(parts) > 1 else ""
+
+
+def sanitize_output_text(text: str) -> str:
+    result: list[str] = []
+    index = 0
+    text = str(text or "")
+    while index < len(text):
+        start = text.find(ANNOTATION_START, index)
+        if start < 0:
+            result.append(text[index:])
+            break
+        result.append(text[index:start])
+        end = text.find(ANNOTATION_END, start + 1)
+        if end < 0:
+            break
+        payload = text[start + 1:end]
+        result.append(_sanitize_annotation(payload.split(ANNOTATION_SEP)))
+        index = end + 1
+    return "".join(result)
 
 
 def assistant_text(event: dict[str, Any], current_text: str = "", history_text: str = "") -> str:
@@ -474,12 +529,15 @@ def iter_conversation_payloads(payloads: Iterator[str], history_text: str = "",
             history_index += 1
             state.text = ""
             continue
-        next_text = assistant_text(event, state.text, history_text)
+        next_raw_text = assistant_text(event, state.raw_text, history_text)
+        next_text = sanitize_output_text(next_raw_text)
         if next_text != state.text:
             delta = next_text[len(state.text):] if next_text.startswith(state.text) else next_text
+            state.raw_text = next_raw_text
             state.text = next_text
             yield conversation_base_event("conversation.delta", state, raw=event, delta=delta)
             continue
+        state.raw_text = next_raw_text
         yield conversation_base_event("conversation.event", state, raw=event)
 
 
@@ -490,12 +548,15 @@ def conversation_events(
     prompt: str = "",
     images: list[str] | None = None,
     size: str | None = None,
+    quality: str = "auto",
 ) -> Iterator[dict[str, Any]]:
+    if str(model or "").strip().lower() in {"gpt-5.1-codex", "gpt-5-codex", "gpt-5-codex-mini", "codex-mini-latest"}:
+        model = "auto"
     normalized = normalize_messages(messages or ([{"role": "user", "content": prompt}] if prompt else []))
     image_model = str(model or "").strip() in IMAGE_MODELS
     history_text = "" if image_model else assistant_history_text(normalized)
     history_messages = [] if image_model else assistant_history_messages(normalized)
-    final_prompt = prompt_with_global_system(build_image_prompt(prompt, size)) if image_model else prompt
+    final_prompt = prompt_with_global_system(build_image_prompt(prompt, size, quality)) if image_model else prompt
     payloads = backend.stream_conversation(
         messages=normalized,
         model=model,
@@ -557,6 +618,7 @@ def stream_image_outputs(
             model=request.model,
             images=request.images or [],
             size=request.size,
+            quality=request.quality,
     ):
         last = event
         if event.get("type") == "conversation.delta":

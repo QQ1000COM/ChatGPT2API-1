@@ -29,11 +29,25 @@ class UserKeyCreateRequest(BaseModel):
     name: str = ""
     quota: int = 0
     unlimited: bool = False
+    chat_enabled: bool = False
+    commerce_permissions: list[str] = Field(default_factory=list)
+    allowed_models: list[str] = Field(default_factory=list)
+    api_permissions: list[str] = Field(default_factory=list)
+    max_concurrency: int = 0
+    webhook_url: str = ""
+    chat_permissions: list[str] = Field(default_factory=list)
 
 
 class UserKeyUpdateRequest(BaseModel):
     name: str | None = None
     enabled: bool | None = None
+    chat_enabled: bool | None = None
+    commerce_permissions: list[str] | None = None
+    allowed_models: list[str] | None = None
+    api_permissions: list[str] | None = None
+    max_concurrency: int | None = None
+    webhook_url: str | None = None
+    chat_permissions: list[str] | None = None
     key: str | None = None
     quota: int | None = None
     unlimited: bool | None = None
@@ -123,6 +137,24 @@ def create_router() -> APIRouter:
                     "used": 0,
                     "unlimited": True,
                     "remaining": None,
+                    "chat_enabled": True,
+                    "commerce_permissions": [
+                        "detail",
+                        "main",
+                        "buyer",
+                        "white",
+                        "replace",
+                        "resize",
+                        "sku",
+                        "ab",
+                        "competitor",
+                    ],
+                    "allowed_models": [],
+                    "api_permissions": ["chat", "responses", "images", "models", "messages", "image_tasks"],
+                    "max_concurrency": 0,
+                    "webhook_url": "",
+                    "chat_permissions": ["chat", "attachments", "web", "code", "image_understanding"],
+                    "usage": {},
                 }
             }
         record = auth_service.get_by_id(item_id)
@@ -139,6 +171,13 @@ def create_router() -> APIRouter:
                 name=body.name,
                 quota=max(0, int(body.quota or 0)),
                 unlimited=bool(body.unlimited),
+                chat_enabled=bool(body.chat_enabled),
+                commerce_permissions=body.commerce_permissions,
+                allowed_models=body.allowed_models,
+                api_permissions=body.api_permissions,
+                max_concurrency=body.max_concurrency,
+                webhook_url=body.webhook_url,
+                chat_permissions=body.chat_permissions,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
@@ -156,6 +195,13 @@ def create_router() -> APIRouter:
             for key, value in {
                 "name": body.name,
                 "enabled": body.enabled,
+                "chat_enabled": body.chat_enabled,
+                "commerce_permissions": body.commerce_permissions,
+                "allowed_models": body.allowed_models,
+                "api_permissions": body.api_permissions,
+                "max_concurrency": body.max_concurrency,
+                "webhook_url": body.webhook_url,
+                "chat_permissions": body.chat_permissions,
                 "key": body.key,
                 "quota": body.quota,
                 "unlimited": body.unlimited,

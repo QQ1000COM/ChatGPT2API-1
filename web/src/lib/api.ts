@@ -54,6 +54,10 @@ export type SettingsConfig = {
   proxy: string;
   site_name?: string;
   browser_title?: string;
+  announcement?: {
+    enabled?: boolean;
+    html?: string;
+  };
   base_url?: string;
   global_system_prompt?: string;
   sensitive_words?: string[];
@@ -202,6 +206,9 @@ export type ManagedImage = {
   group_rels?: string[];
   tool_name?: string;
   product_name?: string;
+  task_status?: string;
+  task_size?: string;
+  task_model?: string;
 };
 
 export type ImageOwner = {
@@ -256,6 +263,25 @@ export type ImageTask = {
   prompt?: string;
   retry_count?: number;
 };
+
+export type ChatMessage = {
+  role: "system" | "user" | "assistant";
+  content: string;
+};
+
+export async function createChatCompletion(messages: ChatMessage[], model = "auto", options: { commerceFeature?: string } = {}) {
+  return httpRequest<{
+    choices?: Array<{ message?: { role?: string; content?: string } }>;
+  }>("/v1/chat/completions", {
+    method: "POST",
+    body: {
+      model,
+      messages,
+      stream: false,
+      ...(options.commerceFeature ? { commerce_feature: options.commerceFeature } : {}),
+    },
+  });
+}
 
 type ImageTaskListResponse = {
   items: ImageTask[];
@@ -318,6 +344,24 @@ export type UserKey = {
   name: string;
   role: "user";
   enabled: boolean;
+  chat_enabled: boolean;
+  commerce_permissions?: string[];
+  allowed_models?: string[];
+  api_permissions?: string[];
+  max_concurrency?: number;
+  webhook_url?: string;
+  chat_permissions?: string[];
+  usage?: {
+    chat_calls?: number;
+    response_calls?: number;
+    message_calls?: number;
+    image_calls?: number;
+    model_calls?: number;
+    input_tokens?: number;
+    output_tokens?: number;
+    images?: number;
+    attachments?: number;
+  };
   created_at: string | null;
   last_used_at: string | null;
   quota: number;
@@ -330,6 +374,14 @@ export type AuthIdentity = {
   id: string;
   name: string;
   role: AuthRole;
+  chat_enabled?: boolean;
+  commerce_permissions?: string[];
+  allowed_models?: string[];
+  api_permissions?: string[];
+  max_concurrency?: number;
+  webhook_url?: string;
+  chat_permissions?: string[];
+  usage?: UserKey["usage"];
   quota: number;
   used: number;
   unlimited: boolean;
@@ -469,7 +521,13 @@ export async function editImage(files: File | File[], prompt: string, model?: Im
   );
 }
 
-export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string) {
+export async function createImageGenerationTask(
+  clientTaskId: string,
+  prompt: string,
+  model?: ImageModel,
+  size?: string,
+  group?: { group_id?: string; group_title?: string; group_index?: number },
+) {
   return httpRequest<ImageTask>("/api/image-tasks/generations", {
     method: "POST",
     body: {
@@ -477,6 +535,9 @@ export async function createImageGenerationTask(clientTaskId: string, prompt: st
       prompt,
       ...(model ? { model } : {}),
       ...(size ? { size } : {}),
+      ...(group?.group_id ? { group_id: group.group_id } : {}),
+      ...(group?.group_title ? { group_title: group.group_title } : {}),
+      ...(group?.group_index !== undefined ? { group_index: group.group_index } : {}),
     },
   });
 }
@@ -487,6 +548,8 @@ export async function createImageEditTask(
   prompt: string,
   model?: ImageModel,
   size?: string,
+  group?: { group_id?: string; group_title?: string; group_index?: number },
+  commerceFeature?: string,
 ) {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
@@ -501,6 +564,18 @@ export async function createImageEditTask(
   }
   if (size) {
     formData.append("size", size);
+  }
+  if (group?.group_id) {
+    formData.append("group_id", group.group_id);
+  }
+  if (group?.group_title) {
+    formData.append("group_title", group.group_title);
+  }
+  if (group?.group_index !== undefined) {
+    formData.append("group_index", String(group.group_index));
+  }
+  if (commerceFeature) {
+    formData.append("commerce_feature", commerceFeature);
   }
 
   return httpRequest<ImageTask>("/api/image-tasks/edits", {
@@ -536,7 +611,15 @@ export async function fetchSettingsConfig() {
 }
 
 export async function fetchPublicConfig() {
-  return httpRequest<{ site_name: string; browser_title?: string; qq_oauth_enabled?: boolean; new_user_free_quota?: number; invite_reward_quota?: number }>("/api/public-config", { redirectOnUnauthorized: false });
+  return httpRequest<{
+    site_name: string;
+    browser_title?: string;
+    announcement_enabled?: boolean;
+    announcement_html?: string;
+    qq_oauth_enabled?: boolean;
+    new_user_free_quota?: number;
+    invite_reward_quota?: number;
+  }>("/api/public-config", { redirectOnUnauthorized: false });
 }
 
 export async function updateSettingsConfig(settings: SettingsConfig) {
@@ -675,13 +758,25 @@ export function getBackupDownloadUrl(key: string) {
   return `/api/backups/download?${params.toString()}`;
 }
 
-export async function fetchManagedImages(filters: { start_date?: string; end_date?: string; owner?: string }) {
+export async function fetchManagedImages(filters: { start_date?: string; end_date?: string; owner?: string; q?: string; tag?: string; size?: string; tool?: string; status?: string }) {
   const params = new URLSearchParams();
   if (filters.start_date) params.set("start_date", filters.start_date);
   if (filters.end_date) params.set("end_date", filters.end_date);
   if (filters.owner) params.set("owner", filters.owner);
+  if (filters.q) params.set("q", filters.q);
+  if (filters.tag) params.set("tag", filters.tag);
+  if (filters.size) params.set("size", filters.size);
+  if (filters.tool) params.set("tool", filters.tool);
+  if (filters.status) params.set("status", filters.status);
   return httpRequest<{ items: ManagedImage[]; groups: Array<{ date: string; items: ManagedImage[] }> }>(
     `/api/images${params.toString() ? `?${params.toString()}` : ""}`,
+  );
+}
+
+export async function dedupeManagedImages(payload: { threshold?: number; dry_run?: boolean }) {
+  return httpRequest<{ groups: Array<{ keep: string; duplicates: string[]; count: number }>; removed: number; dry_run: boolean }>(
+    "/api/images/dedupe",
+    { method: "POST", body: payload },
   );
 }
 
@@ -774,13 +869,20 @@ export async function fetchMyIdentity() {
   return httpRequest<{ identity: AuthIdentity }>("/api/auth/me");
 }
 
-export async function createUserKey(payload: { name?: string; quota?: number; unlimited?: boolean }) {
+export async function createUserKey(payload: { name?: string; quota?: number; unlimited?: boolean; chat_enabled?: boolean; commerce_permissions?: string[]; allowed_models?: string[]; api_permissions?: string[]; max_concurrency?: number; webhook_url?: string; chat_permissions?: string[] }) {
   return httpRequest<{ item: UserKey; key: string; items: UserKey[] }>("/api/auth/users", {
     method: "POST",
     body: {
       name: payload.name ?? "",
       quota: Math.max(0, Number(payload.quota ?? 0) || 0),
       unlimited: Boolean(payload.unlimited),
+      chat_enabled: Boolean(payload.chat_enabled),
+      commerce_permissions: payload.commerce_permissions ?? [],
+      allowed_models: payload.allowed_models ?? [],
+      api_permissions: payload.api_permissions ?? [],
+      max_concurrency: Math.max(0, Number(payload.max_concurrency ?? 0) || 0),
+      webhook_url: payload.webhook_url ?? "",
+      chat_permissions: payload.chat_permissions ?? [],
     },
   });
 }
@@ -789,6 +891,13 @@ export async function updateUserKey(
   keyId: string,
   updates: {
     enabled?: boolean;
+    chat_enabled?: boolean;
+    commerce_permissions?: string[];
+    allowed_models?: string[];
+    api_permissions?: string[];
+    max_concurrency?: number;
+    webhook_url?: string;
+    chat_permissions?: string[];
     name?: string;
     key?: string;
     quota?: number;

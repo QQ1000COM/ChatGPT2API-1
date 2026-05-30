@@ -56,6 +56,37 @@ def sse_json_stream(items) -> Iterator[str]:
     yield "data: [DONE]\n\n"
 
 
+def responses_sse_stream(items) -> Iterator[str]:
+    sequence_number = 0
+    try:
+        for item in items:
+            if isinstance(item, dict):
+                payload = dict(item)
+                event = str(payload.get("type") or "response.delta")
+                payload.setdefault("sequence_number", sequence_number)
+                sequence_number += 1
+            else:
+                payload = item
+                event = "response.delta"
+            yield f"event: {event}\n"
+            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+    except Exception as exc:
+        logger.warning({
+            "event": "responses_sse_stream_error",
+            "error_type": exc.__class__.__name__,
+            "error": str(exc),
+        })
+        error = {
+            "type": "error",
+            "error": {"message": str(exc), "type": exc.__class__.__name__},
+            "sequence_number": sequence_number,
+        }
+        yield "event: error\n"
+        yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
+    yield "event: done\n"
+    yield "data: [DONE]\n\n"
+
+
 def anthropic_sse_stream(items) -> Iterator[str]:
     try:
         for item in items:

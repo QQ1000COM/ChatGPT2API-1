@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, Folder, ImageIcon, LoaderCircle, Maximize2, Plus, RefreshCw, Search, Share2, Tag, Trash2, User, X } from "lucide-react";
+import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, Folder, ImageIcon, LoaderCircle, Maximize2, Plus, RefreshCw, Search, Share2, Sparkles, Tag, Trash2, User, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
@@ -13,7 +13,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { deleteImageTag, deleteManagedImages, downloadImages, downloadSingleImage, fetchImageOwners, fetchImageTags, fetchManagedImages, getMyPublishedBatch, publishGalleryItem, setImageTags, type ImageOwner, type ManagedImage } from "@/lib/api";
+import { dedupeManagedImages, deleteImageTag, deleteManagedImages, downloadImages, downloadSingleImage, fetchImageOwners, fetchImageTags, fetchManagedImages, getMyPublishedBatch, publishGalleryItem, setImageTags, type ImageOwner, type ManagedImage } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const LONG_PRESS_MS = 800;
@@ -261,6 +261,10 @@ type ImageManagerCache = {
   startDate: string;
   endDate: string;
   owner: string;
+  query: string;
+  size: string;
+  tool: string;
+  status: string;
 };
 let cachedImageManager: ImageManagerCache | null = null;
 
@@ -300,6 +304,10 @@ function ImageManagerContent() {
   const [startDate, setStartDate] = useState(() => cachedImageManager?.startDate ?? "");
   const [endDate, setEndDate] = useState(() => cachedImageManager?.endDate ?? "");
   const [owner, setOwner] = useState(() => cachedImageManager?.owner ?? "");
+  const [query, setQuery] = useState(() => cachedImageManager?.query ?? "");
+  const [sizeFilter, setSizeFilter] = useState(() => cachedImageManager?.size ?? "");
+  const [toolFilter, setToolFilter] = useState(() => cachedImageManager?.tool ?? "");
+  const [statusFilter, setStatusFilter] = useState(() => cachedImageManager?.status ?? "");
   const [owners, setOwnersState] = useState<ImageOwner[]>(() => cachedImageManager?.owners ?? []);
   const [ownerPickerOpen, setOwnerPickerOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
@@ -317,6 +325,7 @@ function ImageManagerContent() {
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [deleteMode, setDeleteMode] = useState<"selected" | "filtered" | null>(null);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isDeduping, setIsDeduping] = useState(false);
 
   // 发布画廊状态：rel → "publishing" | "published"。
   // admin 视角下未必由当前账号发的，被任何用户发过都标"已发布"，
@@ -345,11 +354,15 @@ function ImageManagerContent() {
           startDate,
           endDate,
           owner,
+          query,
+          size: sizeFilter,
+          tool: toolFilter,
+          status: statusFilter,
         };
         return value;
       });
     },
-    [startDate, endDate, owner],
+    [startDate, endDate, owner, query, sizeFilter, toolFilter, statusFilter],
   );
   const setAllTags = useCallback(
     (next: string[] | ((prev: string[]) => string[])) => {
@@ -362,11 +375,15 @@ function ImageManagerContent() {
           startDate,
           endDate,
           owner,
+          query,
+          size: sizeFilter,
+          tool: toolFilter,
+          status: statusFilter,
         };
         return value;
       });
     },
-    [startDate, endDate, owner],
+    [startDate, endDate, owner, query, sizeFilter, toolFilter, statusFilter],
   );
   const setOwners = useCallback(
     (next: ImageOwner[]) => {
@@ -381,9 +398,13 @@ function ImageManagerContent() {
         startDate,
         endDate,
         owner,
+        query,
+        size: sizeFilter,
+        tool: toolFilter,
+        status: statusFilter,
       };
     },
-    [startDate, endDate, owner],
+    [startDate, endDate, owner, query, sizeFilter, toolFilter, statusFilter],
   );
 
   const filteredItems = selectedTags.length > 0
@@ -420,7 +441,15 @@ function ImageManagerContent() {
     if (!silent) setIsLoading(true);
     try {
       const [data, tagsData, ownersData] = await Promise.all([
-        fetchManagedImages({ start_date: startDate, end_date: endDate, owner }),
+        fetchManagedImages({
+          start_date: startDate,
+          end_date: endDate,
+          owner,
+          q: query,
+          size: sizeFilter,
+          tool: toolFilter,
+          status: statusFilter,
+        }),
         fetchImageTags(),
         fetchImageOwners(),
       ]);
@@ -624,6 +653,10 @@ function ImageManagerContent() {
     setStartDate("");
     setEndDate("");
     setOwner("");
+    setQuery("");
+    setSizeFilter("");
+    setToolFilter("");
+    setStatusFilter("");
     setSelectedTags([]);
   };
 
@@ -669,6 +702,61 @@ function ImageManagerContent() {
     await downloadSingleImage(item.rel);
   };
 
+  const handleFolderDownload = async (entry: Extract<ManagedEntry, { type: "folder" }>) => {
+    const paths = entry.items.map(imageKey);
+    if (paths.length === 0) return;
+    setIsDownloading(true);
+    try {
+      await downloadImages(paths, `${entry.title || entry.id}.zip`);
+      toast.success(`已下载 ${paths.length} 张图片`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "下载失败");
+    } finally {
+      setIsDownloading(false);
+    }
+  };
+
+  const handleDedupe = async () => {
+    setIsDeduping(true);
+    try {
+      const preview = await dedupeManagedImages({ threshold: 4, dry_run: true });
+      const duplicateCount = preview.groups.reduce((sum, group) => sum + group.duplicates.length, 0);
+      if (duplicateCount === 0) {
+        toast.success("没有发现相似重复图片");
+        return;
+      }
+      const result = await dedupeManagedImages({ threshold: 4, dry_run: false });
+      toast.success(`已清理 ${result.removed} 张相似重复图片`);
+      await loadImages(true);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "相似图去重失败");
+    } finally {
+      setIsDeduping(false);
+    }
+  };
+
+  const continueInImage = (item: ManagedImage, template: "main" | "detail" | "feature" = "main") => {
+    try {
+      window.localStorage.setItem(
+        "image-commerce-draft",
+        JSON.stringify({
+          template,
+          product: item.product_name || item.name.replace(/\.[^.]+$/, ""),
+          category: "",
+          sellingPoints: item.prompt || "",
+          platform: "淘宝/天猫",
+          audience: "",
+          style: "高级简洁",
+          background: "",
+          constraints: `参考图片：${item.url}`,
+        }),
+      );
+      window.location.href = "/image";
+    } catch {
+      toast.error("无法写入二次编辑草稿");
+    }
+  };
+
   // 首次挂载且缓存命中（filter 与缓存一致）→ 静默刷新；
   // 之后改 filter 触发的 effect 都正常 spinner。
   const isFirstRunRef = useRef(true);
@@ -679,9 +767,13 @@ function ImageManagerContent() {
       !!cachedImageManager &&
       cachedImageManager.startDate === startDate &&
       cachedImageManager.endDate === endDate &&
-      cachedImageManager.owner === owner;
+      cachedImageManager.owner === owner &&
+      cachedImageManager.query === query &&
+      cachedImageManager.size === sizeFilter &&
+      cachedImageManager.tool === toolFilter &&
+      cachedImageManager.status === statusFilter;
     void loadImages(isFirst && cacheMatches);
-  }, [startDate, endDate, owner]);
+  }, [startDate, endDate, owner, query, sizeFilter, toolFilter, statusFilter]);
 
   return (
     <section className="mt-4 space-y-5 sm:mt-6">
@@ -691,6 +783,34 @@ function ImageManagerContent() {
           <h1 className="text-2xl font-semibold tracking-tight">图片管理</h1>
         </div>
         <div className="flex flex-wrap gap-2">
+          <Input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="搜索提示词/商品/SKU/文件"
+            className="h-10 w-56 rounded-xl border-stone-200 bg-white"
+          />
+          <Input
+            value={sizeFilter}
+            onChange={(event) => setSizeFilter(event.target.value)}
+            placeholder="尺寸，如 1024x1024 / 1:1"
+            className="h-10 w-44 rounded-xl border-stone-200 bg-white"
+          />
+          <Input
+            value={toolFilter}
+            onChange={(event) => setToolFilter(event.target.value)}
+            placeholder="工具来源"
+            className="h-10 w-36 rounded-xl border-stone-200 bg-white"
+          />
+          <select
+            value={statusFilter}
+            onChange={(event) => setStatusFilter(event.target.value)}
+            className="h-10 rounded-xl border border-stone-200 bg-white px-3 text-sm text-stone-700 outline-none focus:border-stone-400"
+          >
+            <option value="">全部状态</option>
+            <option value="success">成功</option>
+            <option value="error">失败</option>
+            <option value="canceled">取消</option>
+          </select>
           <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); }} />
           <OwnerFilter
             value={owner}
@@ -708,6 +828,10 @@ function ImageManagerContent() {
           <Button onClick={() => void loadImages()} disabled={isLoading} className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800">
             {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
             查询
+          </Button>
+          <Button variant="outline" onClick={() => void handleDedupe()} disabled={isDeduping} className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700">
+            {isDeduping ? <LoaderCircle className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
+            相似去重
           </Button>
           <Button variant="outline" onClick={() => setDeleteMode("filtered")} disabled={isDeleting || items.length === 0 || (!startDate && !endDate && !owner)} className="h-10 rounded-xl border-rose-200 bg-white px-4 text-rose-600 hover:bg-rose-50">
             <Trash2 className="size-4" />
@@ -848,6 +972,19 @@ function ImageManagerContent() {
                         <span>收纳盒</span>
                         <span>{entry.items[0]?.created_at || "-"}</span>
                       </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="h-8 rounded-lg border-stone-200 bg-white px-2.5 text-xs text-stone-600 hover:bg-stone-50"
+                          onClick={() => void handleFolderDownload(entry)}
+                          disabled={isDownloading}
+                        >
+                          {isDownloading ? <LoaderCircle className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+                          打包下载
+                        </Button>
+                        <span className="text-[11px] text-stone-400">独立文件夹</span>
+                      </div>
                     </div>
                   </div>
                 );
@@ -944,6 +1081,24 @@ function ImageManagerContent() {
                         ) : (
                           <Share2 className="size-4" />
                         )}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-8 rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-700"
+                        onClick={() => continueInImage(item, "main")}
+                        title="继续改图"
+                      >
+                        <Sparkles className="size-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-8 rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-700"
+                        onClick={() => continueInImage(item, "detail")}
+                        title="生成详情页"
+                      >
+                        <ImageIcon className="size-4" />
                       </Button>
                       <Button
                         variant="ghost"

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -74,6 +77,23 @@ def _collect_image_urls(data: list[Any]) -> list[str]:
     return urls
 
 
+def _cache_key(mode: str, payload: dict[str, Any]) -> str:
+    digest = hashlib.sha256()
+    digest.update(str(mode or "").encode("utf-8"))
+    for key in ("prompt", "model", "size", "quality", "response_format"):
+        digest.update(b"\0")
+        digest.update(str(payload.get(key) or "").encode("utf-8"))
+    images = payload.get("images")
+    if isinstance(images, list):
+        for image in images:
+            digest.update(b"\0image:")
+            if isinstance(image, tuple) and image:
+                digest.update(hashlib.sha256(image[0] if isinstance(image[0], bytes) else bytes()).hexdigest().encode("ascii"))
+                digest.update(str(image[1] if len(image) > 1 else "").encode("utf-8"))
+                digest.update(str(image[2] if len(image) > 2 else "").encode("utf-8"))
+    return digest.hexdigest()
+
+
 def _public_task(task: dict[str, Any]) -> dict[str, Any]:
     item = {
         "id": task.get("id"),
@@ -92,6 +112,8 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
         item["prompt"] = task.get("prompt")
     if task.get("retry_count") is not None:
         item["retry_count"] = int(task.get("retry_count") or 0)
+    if task.get("cached") is not None:
+        item["cached"] = bool(task.get("cached"))
     return item
 
 
@@ -128,6 +150,13 @@ def _result_rel(entry: Any) -> str:
         return url[url.find("/images/") + len("/images/") :].strip().lstrip("/")
     remote = find_remote_image_by_url(url)
     return str((remote or {}).get("rel") or (remote or {}).get("path") or "").strip().lstrip("/")
+
+
+def _fallback_task_group(task_id: str) -> tuple[str, int] | None:
+    match = re.match(r"^(?P<group>.+)-(?P<index>\d+)$", task_id or "")
+    if not match:
+        return None
+    return match.group("group"), int(match.group("index"))
 
 
 def _infer_tool_name(prompt: str, mode: str) -> str:
@@ -178,11 +207,15 @@ class ImageTaskService:
         self.edit_handler = edit_handler
         self.retention_days_getter = retention_days_getter or (lambda: config.image_retention_days)
         self.store_key = path.name
+        self.cache_path = path.with_name(f"{path.stem}_cache.json")
+        self.cache_store_key = self.cache_path.name
         self._lock = threading.RLock()
         self._tasks: dict[str, dict[str, Any]] = {}
+        self._cache: dict[str, dict[str, Any]] = {}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
             self._tasks = self._load_locked()
+            self._cache = self._load_cache_locked()
             changed = self._recover_unfinished_locked()
             changed = self._cleanup_locked() or changed
             if changed:
@@ -197,6 +230,9 @@ class ImageTaskService:
         model: str,
         size: str | None,
         base_url: str,
+        group_id: str | None = None,
+        group_title: str | None = None,
+        group_index: int | None = None,
     ) -> dict[str, Any]:
         payload = {
             "prompt": prompt,
@@ -205,6 +241,9 @@ class ImageTaskService:
             "size": size,
             "response_format": "url",
             "base_url": base_url,
+            "group_id": group_id,
+            "group_title": group_title,
+            "group_index": group_index,
         }
         return self._submit(identity, client_task_id=client_task_id, mode="generate", payload=payload)
 
@@ -218,6 +257,9 @@ class ImageTaskService:
         size: str | None,
         base_url: str,
         images: list[tuple[bytes, str, str]],
+        group_id: str | None = None,
+        group_title: str | None = None,
+        group_index: int | None = None,
     ) -> dict[str, Any]:
         payload = {
             "prompt": prompt,
@@ -227,6 +269,9 @@ class ImageTaskService:
             "size": size,
             "response_format": "url",
             "base_url": base_url,
+            "group_id": group_id,
+            "group_title": group_title,
+            "group_index": group_index,
         }
         return self._submit(identity, client_task_id=client_task_id, mode="edit", payload=payload)
 
@@ -289,6 +334,10 @@ class ImageTaskService:
         # 避免与 _run_task 失败分支同时拿锁形成竞态。
         for _ in canceled:
             self._refund_one(identity)
+        for task_id in canceled:
+            with self._lock:
+                task = dict(self._tasks.get(_task_key(owner, task_id)) or {})
+            self._send_webhook(identity, "image_task.canceled", task)
         return {"canceled": canceled, "skipped": skipped, "missing_ids": missing_ids}
 
     def rerun_task(self, identity: dict[str, object], task_id: str, *, base_url: str) -> dict[str, Any]:
@@ -347,12 +396,42 @@ class ImageTaskService:
         key = _task_key(owner, task_id)
         now = _now_iso()
         should_start = False
+        request_cache_key = _cache_key(mode, payload)
         with self._lock:
             cleaned = self._cleanup_locked()
             task = self._tasks.get(key)
             if task is not None:
                 if cleaned:
                     self._save_locked()
+                return _public_task(task)
+            cached = self._cache.get(request_cache_key)
+            cached_data = cached.get("data") if isinstance(cached, dict) else None
+            if isinstance(cached_data, list) and cached_data:
+                task = {
+                    "id": task_id,
+                    "owner_id": owner,
+                    "status": TASK_STATUS_SUCCESS,
+                    "mode": mode,
+                    "model": _clean(payload.get("model"), "gpt-image-2"),
+                    "size": _clean(payload.get("size")),
+                    "prompt": _clean(payload.get("prompt")),
+                    "retry_count": 0,
+                    "cached": True,
+                    "data": cached_data,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                if _clean(payload.get("group_id")):
+                    task["group_id"] = _clean(payload.get("group_id"))
+                if _clean(payload.get("group_title")):
+                    task["group_title"] = _clean(payload.get("group_title"))
+                if payload.get("group_index") is not None:
+                    task["group_index"] = int(payload.get("group_index") or 0)
+                self._tasks[key] = task
+                self._save_locked()
+                record_owner_for_result(identity, cached_data)
+                record_prompt_for_result(payload.get("prompt"), cached_data, is_edit=(mode == "edit"))
+                self._send_webhook(identity, "image_task.success", task)
                 return _public_task(task)
             task = {
                 "id": task_id,
@@ -363,9 +442,16 @@ class ImageTaskService:
                 "size": _clean(payload.get("size")),
                 "prompt": _clean(payload.get("prompt")),
                 "retry_count": 0,
+                "cache_key": request_cache_key,
                 "created_at": now,
                 "updated_at": now,
             }
+            if _clean(payload.get("group_id")):
+                task["group_id"] = _clean(payload.get("group_id"))
+            if _clean(payload.get("group_title")):
+                task["group_title"] = _clean(payload.get("group_title"))
+            if payload.get("group_index") is not None:
+                task["group_index"] = int(payload.get("group_index") or 0)
             self._tasks[key] = task
             self._save_locked()
             should_start = True
@@ -396,7 +482,7 @@ class ImageTaskService:
 
         started = time.time()
         self._update_task(key, status=TASK_STATUS_RUNNING, error="")
-        max_attempts = 2
+        max_attempts = 3
         attempt = 0
         while attempt < max_attempts:
             attempt += 1
@@ -428,6 +514,7 @@ class ImageTaskService:
                 message = _clean(result.get("message")) or "image task returned no image data"
                 raise RuntimeError(message)
             self._update_task(key, status=TASK_STATUS_SUCCESS, data=data, error="")
+            self._store_cache_for_task(key, data)
             # 任务真正成功后再写归属表，避免给失败的临时落盘也挂上 owner。
             # admin / 匿名身份不写，由 record_owner_for_result 内部判断。
             record_owner_for_result(identity, data)
@@ -446,6 +533,9 @@ class ImageTaskService:
                 request_preview=request_text(payload.get("prompt")),
                 urls=_collect_image_urls(data),
             )
+            with self._lock:
+                finished_task = dict(self._tasks.get(key) or {})
+            self._send_webhook(identity, "image_task.success", finished_task)
         except Exception as exc:
             # 请求异常时也要让"已取消"优先，不要把取消覆盖成 error
             with self._lock:
@@ -454,6 +544,9 @@ class ImageTaskService:
                     return
             error_message = str(exc) or "image task failed"
             self._update_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[])
+            with self._lock:
+                failed_task = dict(self._tasks.get(key) or {})
+            self._send_webhook(identity, "image_task.error", failed_task)
             # 上游真失败：退还入口预扣的 1 张额度。
             # admin / unlimited 在 _refund_one 内部 noop；普通用户的 used 减 1 不会跌破 0。
             self._refund_one(identity)
@@ -505,6 +598,81 @@ class ImageTaskService:
         except Exception:
             pass
 
+    def _load_cache_locked(self) -> dict[str, dict[str, Any]]:
+        content = read_text(self.cache_store_key, self.cache_path)
+        if not content:
+            return {}
+        try:
+            raw = json.loads(content)
+        except Exception:
+            return {}
+        cache = raw.get("items") if isinstance(raw, dict) else raw
+        if not isinstance(cache, dict):
+            return {}
+        result: dict[str, dict[str, Any]] = {}
+        for key, value in cache.items():
+            if isinstance(key, str) and isinstance(value, dict) and isinstance(value.get("data"), list):
+                result[key] = {
+                    "created_at": _clean(value.get("created_at"), _now_iso()),
+                    "data": value.get("data"),
+                }
+        return result
+
+    def _save_cache_locked(self) -> None:
+        items = dict(sorted(self._cache.items(), key=lambda item: str(item[1].get("created_at") or ""), reverse=True)[:500])
+        self._cache = items
+        write_text(self.cache_store_key, self.cache_path, json.dumps({"items": items}, ensure_ascii=False, indent=2) + "\n")
+
+    def _store_cache_for_task(self, key: str, data: list[Any]) -> None:
+        if not data:
+            return
+        with self._lock:
+            task = self._tasks.get(key)
+            cache_key = _clean((task or {}).get("cache_key"))
+            if not cache_key:
+                return
+            self._cache[cache_key] = {"created_at": _now_iso(), "data": data}
+            self._save_cache_locked()
+
+    def _send_webhook(self, identity: dict[str, object], event: str, task: dict[str, Any]) -> None:
+        key_id = _clean(identity.get("id"))
+        if not key_id or key_id == "admin":
+            return
+        try:
+            from services.auth_service import auth_service
+            record = auth_service.get_by_id(key_id)
+            url = _clean((record or {}).get("webhook_url"))
+        except Exception:
+            url = ""
+        if not url:
+            return
+
+        payload = {
+            "event": event,
+            "task": _public_task(task),
+            "user": {
+                "id": identity.get("id"),
+                "name": identity.get("name"),
+                "role": identity.get("role"),
+            },
+        }
+
+        def worker() -> None:
+            try:
+                data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                request = urllib.request.Request(
+                    url,
+                    data=data,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=5):
+                    pass
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+                pass
+
+        threading.Thread(target=worker, name=f"image-task-webhook-{_clean(task.get('id'))[:16]}", daemon=True).start()
+
     def _update_task(self, key: str, **updates: Any) -> None:
         with self._lock:
             task = self._tasks.get(key)
@@ -548,6 +716,16 @@ class ImageTaskService:
                 "created_at": _clean(item.get("created_at"), _now_iso()),
                 "updated_at": _clean(item.get("updated_at"), _clean(item.get("created_at"), _now_iso())),
             }
+            if _clean(item.get("cache_key")):
+                task["cache_key"] = _clean(item.get("cache_key"))
+            if item.get("cached") is not None:
+                task["cached"] = bool(item.get("cached"))
+            if _clean(item.get("group_id")):
+                task["group_id"] = _clean(item.get("group_id"))
+            if _clean(item.get("group_title")):
+                task["group_title"] = _clean(item.get("group_title"))
+            if item.get("group_index") is not None:
+                task["group_index"] = int(item.get("group_index") or 0)
             data = item.get("data")
             if isinstance(data, list):
                 task["data"] = data
@@ -565,11 +743,12 @@ class ImageTaskService:
         with self._lock:
             tasks = [dict(task) for task in self._tasks.values()]
         index: dict[str, dict[str, Any]] = {}
+        task_groups: dict[str, list[dict[str, Any]]] = {}
         for task in tasks:
             if task.get("status") != TASK_STATUS_SUCCESS:
                 continue
             data = _public_task_data(task.get("data"))
-            if not isinstance(data, list) or len(data) <= 1:
+            if not isinstance(data, list):
                 continue
             rels: list[str] = []
             seen: set[str] = set()
@@ -579,13 +758,28 @@ class ImageTaskService:
                     continue
                 seen.add(rel)
                 rels.append(rel)
-            if len(rels) <= 1:
+            if not rels:
                 continue
             prompt = _clean(task.get("prompt"))
             tool_name = _infer_tool_name(prompt, _clean(task.get("mode")))
             product_name = _infer_product_name(prompt)
-            group_id = _clean(task.get("id")) or "|".join(rels)
+            fallback = _fallback_task_group(_clean(task.get("id")))
+            group_id = _clean(task.get("group_id")) or (fallback[0] if fallback else "")
+            group_index = int(task.get("group_index") if task.get("group_index") is not None else (fallback[1] if fallback else 0))
             title = f"{tool_name} {product_name}".strip()
+            if len(rels) == 1 and group_id:
+                task_groups.setdefault(group_id, []).append(
+                    {
+                        "rel": rels[0],
+                        "group_index": group_index,
+                        "group_title": title,
+                        "tool_name": tool_name,
+                        "product_name": product_name,
+                        "created_at": _clean(task.get("created_at")),
+                    }
+                )
+                continue
+            group_id = group_id or _clean(task.get("id")) or "|".join(rels)
             for idx, rel in enumerate(rels):
                 index[rel] = {
                     "group_id": group_id,
@@ -595,6 +789,31 @@ class ImageTaskService:
                     "group_rels": rels,
                     "tool_name": tool_name,
                     "product_name": product_name,
+                    "task_status": _clean(task.get("status")),
+                    "task_size": _clean(task.get("size")),
+                    "task_model": _clean(task.get("model")),
+                }
+        for group_id, grouped_items in task_groups.items():
+            if len(grouped_items) <= 1:
+                continue
+            grouped_items.sort(key=lambda item: (int(item.get("group_index") or 0), str(item.get("created_at") or ""), str(item.get("rel") or "")))
+            rels = [str(item["rel"]) for item in grouped_items if item.get("rel")]
+            if len(rels) <= 1:
+                continue
+            first = grouped_items[0]
+            for idx, item in enumerate(grouped_items):
+                rel = str(item.get("rel") or "")
+                if not rel:
+                    continue
+                index[rel] = {
+                    "group_id": group_id,
+                    "group_title": str(first.get("group_title") or "Image batch"),
+                    "group_count": len(rels),
+                    "group_index": idx,
+                    "group_rels": rels,
+                    "tool_name": str(first.get("tool_name") or ""),
+                    "product_name": str(first.get("product_name") or ""),
+                    "task_status": TASK_STATUS_SUCCESS,
                 }
         return index
 

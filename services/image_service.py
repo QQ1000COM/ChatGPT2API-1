@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import re
 import urllib.request
 import zipfile
 from datetime import datetime
@@ -38,6 +39,12 @@ def _safe_relative_path(path: str) -> str:
     return Path(*parts).as_posix()
 
 
+def _safe_zip_segment(value: str, default: str = "folder") -> str:
+    name = re.sub(r'[\\/:*?"<>|\r\n]+', "_", str(value or "").strip())
+    name = re.sub(r"\s+", " ", name).strip(" .")
+    return (name or default)[:80]
+
+
 def _safe_image_path(relative_path: str) -> Path:
     rel = _safe_relative_path(relative_path)
     root = config.images_dir.resolve()
@@ -66,6 +73,29 @@ def _image_dimensions(path: Path) -> tuple[int, int] | None:
             return image.size
     except Exception:
         return None
+
+
+def _infer_sku(prompt: str) -> str:
+    match = re.search(r"(?:SKU|规格|颜色)\s*[/／]?\s*(?:规格|颜色)?\s*[:：]\s*([^\r\n，,。；;]+)", prompt or "", re.I)
+    return (match.group(1).strip()[:40] if match else "")
+
+
+def _auto_tags(item: dict[str, object], owner_name: str = "") -> list[str]:
+    rel = str(item.get("path") or item.get("rel") or "")
+    prompt = str(item.get("prompt") or "")
+    date = str(item.get("date") or "")[:10]
+    width = int(item.get("width") or 0)
+    height = int(item.get("height") or 0)
+    result = [
+        f"日期:{date}" if date else "",
+        f"用户:{owner_name}" if owner_name else "",
+        f"工具:{item.get('tool_name')}" if item.get("tool_name") else "",
+        f"商品:{item.get('product_name')}" if item.get("product_name") else "",
+        f"SKU:{_infer_sku(prompt)}" if _infer_sku(prompt) else "",
+        f"尺寸:{width}x{height}" if width and height else "",
+        f"来源:{rel.split('/', 1)[0]}" if rel else "",
+    ]
+    return [tag for tag in result if tag]
 
 
 def ensure_thumbnail(relative_path: str) -> Path:
@@ -220,30 +250,70 @@ def list_images(
     end_date: str = "",
     owner: str = "",
     admin_ids: set[str] | None = None,
+    query: str = "",
+    tag: str = "",
+    size: str = "",
+    tool: str = "",
+    status: str = "",
+    owner_names: dict[str, str] | None = None,
 ) -> dict[str, object]:
     all_tags = load_tags()
     owners_map = load_owners()
     prompts_map = load_prompts()
     group_map = get_image_task_group_index()
     admin_set = admin_ids or set()
+    owner_name_map = owner_names or {}
+    normalized_query = query.strip().lower()
+    tag_filter = tag.strip()
+    size_filter = size.strip().lower()
+    tool_filter = tool.strip().lower()
+    status_filter = status.strip().lower()
     items = []
     for item in _image_items(start_date, end_date, owner, admin_set):
         rel = str(item["path"])
         owner_id = owners_map.get(rel, "")
         group_info = group_map.get(rel, {})
-        items.append({
+        prompt = prompts_map.get(rel, "")
+        owner_name = "管理员" if owner_id in admin_set or owner_id == "admin" else owner_name_map.get(owner_id, owner_id)
+        enriched = {
             **item,
             "url": str(item.get("url") or "") or f"{base_url.rstrip('/')}/images/{rel}",
             "thumbnail_url": str(item.get("thumbnail_url") or "") or thumbnail_url(base_url, rel),
-            "tags": all_tags.get(rel, []),
             "owner_id": owner_id,
             # 标记给前端：admin 桶里的图都用同一种 badge 文案"管理员"，不暴露具体 admin id
             "is_admin_owner": bool(owner_id) and owner_id in admin_set,
             # 生成时记下来的 prompt 原文。老数据没记录就空字符串。
             # web "我的作品"页据此一键复用 / 发布画廊；为空时让前端弹窗手填。
-            "prompt": prompts_map.get(rel, ""),
+            "prompt": prompt,
             **group_info,
-        })
+        }
+        manual_tags = all_tags.get(rel, [])
+        enriched["tags"] = list(dict.fromkeys([*manual_tags, *_auto_tags(enriched, owner_name)]))
+        haystack = " ".join(
+            str(value or "")
+            for value in [
+                enriched.get("name"),
+                enriched.get("rel"),
+                enriched.get("prompt"),
+                enriched.get("owner_id"),
+                owner_name,
+                enriched.get("tool_name"),
+                enriched.get("product_name"),
+                " ".join(enriched.get("tags") or []),
+            ]
+        ).lower()
+        dimensions = f"{enriched.get('width') or ''}x{enriched.get('height') or ''}".lower()
+        if normalized_query and normalized_query not in haystack:
+            continue
+        if tag_filter and tag_filter not in (enriched.get("tags") or []):
+            continue
+        if size_filter and size_filter not in dimensions and size_filter != str(enriched.get("task_size") or "").lower():
+            continue
+        if tool_filter and tool_filter not in str(enriched.get("tool_name") or "").lower():
+            continue
+        if status_filter and status_filter != str(enriched.get("task_status") or "success").lower():
+            continue
+        items.append(enriched)
     groups: dict[str, list[dict[str, object]]] = {}
     for item in items:
         groups.setdefault(str(item["date"]), []).append(item)
@@ -294,6 +364,7 @@ def delete_images(
 
 def download_images_zip(paths: list[str]) -> io.BytesIO:
     root = config.images_dir.resolve()
+    group_map = get_image_task_group_index()
     remote_map = {
         str(remote.get("rel") or remote.get("path") or "").strip().lstrip("/"): remote
         for remote in list_remote_images()
@@ -323,14 +394,24 @@ def download_images_zip(paths: list[str]) -> io.BytesIO:
                         payload = None
             if not payload:
                 continue
-            name = path.name
+            group_info = group_map.get(rel) or {}
+            group_id = str(group_info.get("group_id") or "").strip()
+            group_count = int(group_info.get("group_count") or 0)
+            if group_id and group_count > 1:
+                folder = _safe_zip_segment(str(group_info.get("group_title") or group_id), "collection")
+                group_index = int(group_info.get("group_index") or 0) + 1
+                name = f"{folder}/{group_index:02d}-{path.name}"
+            else:
+                name = path.name
             if name in used_names:
-                stem = path.stem
-                suffix = path.suffix
+                parent = str(Path(name).parent)
+                prefix = "" if parent == "." else f"{parent}/"
+                stem = Path(name).stem
+                suffix = Path(name).suffix
                 counter = 2
-                while f"{stem}_{counter}{suffix}" in used_names:
+                while f"{prefix}{stem}_{counter}{suffix}" in used_names:
                     counter += 1
-                name = f"{stem}_{counter}{suffix}"
+                name = f"{prefix}{stem}_{counter}{suffix}"
             used_names.add(name)
             zf.writestr(name, payload)
             added += 1
@@ -338,3 +419,57 @@ def download_images_zip(paths: list[str]) -> io.BytesIO:
         raise HTTPException(status_code=404, detail="no images found")
     buf.seek(0)
     return buf
+
+
+def dedupe_similar_images(threshold: int = 4, dry_run: bool = True) -> dict[str, object]:
+    root = config.images_dir.resolve()
+    if not root.exists():
+        return {"groups": [], "removed": 0}
+
+    def average_hash(path: Path) -> str | None:
+        try:
+            with Image.open(path) as image:
+                image = ImageOps.exif_transpose(image).convert("L").resize((8, 8), Image.Resampling.LANCZOS)
+                pixels = list(image.getdata())
+                avg = sum(pixels) / len(pixels)
+                return "".join("1" if pixel >= avg else "0" for pixel in pixels)
+        except Exception:
+            return None
+
+    def distance(left: str, right: str) -> int:
+        return sum(1 for a, b in zip(left, right) if a != b)
+
+    candidates: list[tuple[str, Path, str, int]] = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root).as_posix()
+        h = average_hash(path)
+        if h:
+            candidates.append((rel, path, h, path.stat().st_size))
+
+    used: set[str] = set()
+    groups: list[dict[str, object]] = []
+    to_remove: list[str] = []
+    for rel, path, h, size_bytes in candidates:
+        if rel in used:
+            continue
+        group = [(rel, path, size_bytes)]
+        for other_rel, other_path, other_h, other_size in candidates:
+            if other_rel == rel or other_rel in used:
+                continue
+            if distance(h, other_h) <= threshold:
+                group.append((other_rel, other_path, other_size))
+        if len(group) <= 1:
+            continue
+        group.sort(key=lambda item: (item[1].stat().st_mtime, -item[2]), reverse=True)
+        keep = group[0][0]
+        duplicates = [item[0] for item in group[1:]]
+        used.update(item[0] for item in group)
+        to_remove.extend(duplicates)
+        groups.append({"keep": keep, "duplicates": duplicates, "count": len(group)})
+
+    removed = 0
+    if not dry_run and to_remove:
+        removed = delete_images(to_remove).get("removed", 0)
+    return {"groups": groups, "removed": removed, "dry_run": dry_run}

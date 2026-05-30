@@ -32,6 +32,7 @@ import { useAuthGuard } from "@/lib/use-auth-guard";
 import {
   clearImageConversations,
   deleteImageConversation,
+  getCachedImageConversations,
   getImageConversationStats,
   listImageConversations,
   renameImageConversation,
@@ -590,6 +591,26 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
           } catch {
             // 解析失败就当作没有
           }
+        }
+
+        const cachedItems = await getCachedImageConversations();
+        if (!cancelled && cachedItems.length > 0) {
+          conversationsRef.current = cachedItems;
+          setConversations(cachedItems);
+          const storedConversationId =
+            typeof window !== "undefined" ? window.localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY) : null;
+          if (
+            storedConversationId &&
+            cachedItems.some((conversation) => conversation.id === storedConversationId)
+          ) {
+            setSelectedConversationId(storedConversationId);
+          } else if (storedConversationId === "") {
+            setSelectedConversationId(null);
+          } else {
+            setSelectedConversationId(pickFallbackConversationId(cachedItems));
+          }
+          initialLoadCompleteRef.current = true;
+          setIsLoadingHistory(false);
         }
 
         const items = await listImageConversations();
@@ -1337,12 +1358,20 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         })();
 
         const pendingImages = activeTurn.images.filter((image) => image.status === "loading");
+        const taskGroup =
+          activeTurn.batchId || pendingImages.length > 1
+            ? {
+                group_id: activeTurn.batchId || activeTurn.id,
+                group_title: activeTurn.batchTitle || snapshot.title,
+                group_index: activeTurn.batchIndex ?? 0,
+              }
+            : undefined;
         const submitted = await Promise.all(
           pendingImages.map((image) => {
             const taskId = image.taskId || image.id;
             return activeTurn.mode === "edit"
-              ? createImageEditTask(taskId, referenceFiles, apiPrompt, activeTurn.model, activeTurn.size)
-              : createImageGenerationTask(taskId, apiPrompt, activeTurn.model, activeTurn.size);
+              ? createImageEditTask(taskId, referenceFiles, apiPrompt, activeTurn.model, activeTurn.size, taskGroup)
+              : createImageGenerationTask(taskId, apiPrompt, activeTurn.model, activeTurn.size, taskGroup);
           }),
         );
         await applyTasks(submitted);
@@ -1370,8 +1399,8 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             const resubmitted = await Promise.all(
               missingImages.map((image) =>
                 activeTurn.mode === "edit"
-                  ? createImageEditTask(image.taskId || image.id, referenceFiles, apiPrompt, activeTurn.model, activeTurn.size)
-                  : createImageGenerationTask(image.taskId || image.id, apiPrompt, activeTurn.model, activeTurn.size),
+                  ? createImageEditTask(image.taskId || image.id, referenceFiles, apiPrompt, activeTurn.model, activeTurn.size, taskGroup)
+                  : createImageGenerationTask(image.taskId || image.id, apiPrompt, activeTurn.model, activeTurn.size, taskGroup),
               ),
             );
             if (resubmitted.length > 0) {
@@ -1619,10 +1648,14 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
       const now = new Date().toISOString();
       const conversationId = createId();
-      const turns: ImageTurn[] = prompts.map((item) => {
+      const batchTitle = `${normalizedProductName}详情页套图`;
+      const turns: ImageTurn[] = prompts.map((item, batchIndex) => {
         const turnId = createId();
         return {
           id: turnId,
+          batchId: conversationId,
+          batchTitle,
+          batchIndex,
           prompt: item.prompt,
           model: "gpt-image-2",
           mode: "edit",

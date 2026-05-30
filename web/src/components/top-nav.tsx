@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { MessageCircle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 
@@ -123,8 +124,8 @@ export function TopNav() {
   useEffect(() => {
     if (!session || pathname === "/login") return;
     const routes = session.role === "admin"
-      ? ["/image", "/detail-page", "/task-center", "/gallery", "/image-manager", "/settings"]
-      : ["/image", "/detail-page", "/task-center", "/works", "/gallery", "/profile"];
+      ? ["/chat", "/image", "/detail-page", "/task-center", "/gallery", "/image-manager", "/settings"]
+      : ["/chat", "/image", "/detail-page", "/task-center", "/works", "/gallery", "/profile"];
     const timer = window.setTimeout(() => {
       routes.forEach((route) => router.prefetch(route));
     }, 600);
@@ -272,6 +273,19 @@ export function TopNav() {
           <div className="min-w-0 flex-1" aria-hidden />
         )}
         <div className="flex shrink-0 items-center justify-end gap-2">
+          <Link
+            href="/chat"
+            className={cn(
+              "inline-flex size-8 items-center justify-center rounded-md border border-border/70 bg-card text-muted-foreground transition hover:bg-accent hover:text-foreground",
+              normalizePath(pathname || "/") === "/chat" && "border-foreground/20 text-foreground",
+            )}
+            aria-label="AI 对话"
+            title="AI 对话"
+            onMouseEnter={() => router.prefetch("/chat")}
+            onFocus={() => router.prefetch("/chat")}
+          >
+            <MessageCircle className="size-4" />
+          </Link>
           <span className="hidden items-center gap-1.5 rounded-md border border-border/70 bg-card px-2 py-1 text-[11px] leading-none text-muted-foreground lg:inline-flex">
             <span className="relative flex size-1.5">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />

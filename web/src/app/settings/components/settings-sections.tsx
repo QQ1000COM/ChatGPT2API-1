@@ -9,6 +9,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { testProxy, type ProxyTestResult } from "@/lib/api";
+import { sanitizeAnnouncementHtml } from "@/lib/html";
 
 import { useSettingsStore } from "../store";
 
@@ -143,6 +144,7 @@ export function ImageSection() {
   const [currentOrigin, setCurrentOrigin] = useState("");
   const setSiteName = useSettingsStore((s) => s.setSiteName);
   const setBrowserTitle = useSettingsStore((s) => s.setBrowserTitle);
+  const setAnnouncementField = useSettingsStore((s) => s.setAnnouncementField);
   const setBaseUrl = useSettingsStore((s) => s.setBaseUrl);
   const setQQOAuthField = useSettingsStore((s) => s.setQQOAuthField);
   const setQQNewUserFreeQuota = useSettingsStore((s) => s.setQQNewUserFreeQuota);
@@ -180,6 +182,28 @@ export function ImageSection() {
           className={INPUT_CLASS}
         />
         <p className={HELP_CLASS}>留空时默认使用网站名称。</p>
+      </div>
+
+      <div className="space-y-3 rounded-xl border border-stone-200 bg-stone-50/60 p-4">
+        <label className="flex items-center gap-3 text-sm font-medium text-stone-800">
+          <Checkbox
+            checked={Boolean(config?.announcement?.enabled)}
+            onCheckedChange={(checked) => setAnnouncementField("enabled", Boolean(checked))}
+          />
+          开启顶部 HTML 公告
+        </label>
+        <Textarea
+          value={String(config?.announcement?.html || "")}
+          onChange={(event) => setAnnouncementField("html", event.target.value)}
+          placeholder="<b>系统公告：</b>今晚 23:00 维护，期间任务可能排队。"
+          className="min-h-28 rounded-xl border-stone-200 bg-white font-mono text-xs shadow-none"
+        />
+        <p className={HELP_CLASS}>支持常用 HTML 标签；前台会过滤 script、事件属性和 javascript 链接。</p>
+        {String(config?.announcement?.html || "").trim() ? (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-950">
+            <div dangerouslySetInnerHTML={{ __html: sanitizeAnnouncementHtml(String(config?.announcement?.html || "")) }} />
+          </div>
+        ) : null}
       </div>
 
       <div className="space-y-3 rounded-xl border border-stone-200 bg-stone-50/60 p-4">

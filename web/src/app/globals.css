@@ -467,6 +467,18 @@
 }
 
 @layer utilities {
+  .announcement-html a {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+  .announcement-html p {
+    margin: 0;
+  }
+  .announcement-html ul,
+  .announcement-html ol {
+    margin: 0;
+    padding-left: 1.25rem;
+  }
   .aurora-drift-a {
     animation: aurora-drift-a 18s ease-in-out infinite;
     will-change: transform;

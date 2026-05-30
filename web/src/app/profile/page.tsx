@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Copy, Folder, LoaderCircle, MessageCircle, RefreshCw } from "lucide-react";
+import { Copy, Download, Folder, LoaderCircle, Maximize2, MessageCircle, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
+import { ImageLightbox } from "@/components/image-lightbox";
 import { Button } from "@/components/ui/button";
-import { createQQBindUrl, fetchMyProfile, type MyProfile } from "@/lib/api";
+import { createQQBindUrl, downloadImages, fetchMyProfile, type MyProfile } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 type ProfileImage = MyProfile["images"][number];
@@ -51,6 +52,10 @@ export default function ProfilePage() {
   const [data, setData] = useState<MyProfile | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isBinding, setIsBinding] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [lightboxImages, setLightboxImages] = useState<Array<{ id: string; src: string; sizeLabel?: string; dimensions?: string }>>([]);
+  const [lightboxIndex, setLightboxIndex] = useState(0);
+  const [lightboxOpen, setLightboxOpen] = useState(false);
 
   const load = async () => {
     setIsLoading(true);
@@ -112,6 +117,41 @@ export default function ProfilePage() {
   };
 
   const imageEntries = useMemo(() => groupProfileImages(data?.images || []), [data?.images]);
+  const allLightboxImages = useMemo(
+    () =>
+      (data?.images || []).map((image) => ({
+        id: image.rel,
+        src: image.url,
+        sizeLabel: image.size ? `${(image.size / 1024 / 1024).toFixed(2)} MB` : undefined,
+        dimensions: image.width && image.height ? `${image.width} x ${image.height}` : undefined,
+      })),
+    [data?.images],
+  );
+
+  const openImages = (images: ProfileImage[], index: number) => {
+    const items = images.map((image) => ({
+      id: image.rel,
+      src: image.url,
+      sizeLabel: image.size ? `${(image.size / 1024 / 1024).toFixed(2)} MB` : undefined,
+      dimensions: image.width && image.height ? `${image.width} x ${image.height}` : undefined,
+    }));
+    setLightboxImages(items);
+    setLightboxIndex(Math.max(0, Math.min(index, items.length - 1)));
+    setLightboxOpen(items.length > 0);
+  };
+
+  const downloadPaths = async (paths: string[], filename = "images.zip") => {
+    if (paths.length === 0) return;
+    setIsDownloading(true);
+    try {
+      await downloadImages(paths, filename);
+      toast.success(`已下载 ${paths.length} 张图片`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "下载失败");
+    } finally {
+      setIsDownloading(false);
+    }
+  };
 
   if (isCheckingAuth || !session || isLoading) {
     return (
@@ -208,9 +248,21 @@ export default function ProfilePage() {
       ) : null}
 
       <section className="rounded-2xl border border-border bg-card shadow-sm">
-        <div className="border-b border-border px-4 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
+          <div>
           <div className="text-sm font-semibold">生图记录</div>
           <div className="mt-1 text-xs text-muted-foreground">共 {data?.image_count || 0} 张，最近最多显示 60 张。</div>
+        </div>
+          <Button
+            type="button"
+            variant="outline"
+            className="rounded-xl"
+            disabled={isDownloading || (data?.images || []).length === 0}
+            onClick={() => void downloadPaths((data?.images || []).map((image) => image.rel))}
+          >
+            {isDownloading ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
+            打包下载
+          </Button>
         </div>
         <div className="grid gap-3 p-3 sm:grid-cols-2 lg:grid-cols-4">
           {(data?.images || []).length === 0 ? (
@@ -222,9 +274,9 @@ export default function ProfilePage() {
                   <div key={entry.id} className="overflow-hidden rounded-xl border border-border bg-background">
                     <div className="grid aspect-square grid-cols-2 gap-1 bg-muted p-2">
                       {entry.items.slice(0, 4).map((image) => (
-                        <a key={image.rel} href={image.url} target="_blank" rel="noreferrer" className="overflow-hidden rounded-lg bg-background">
+                        <button key={image.rel} type="button" onClick={() => openImages(entry.items, entry.items.findIndex((item) => item.rel === image.rel))} className="overflow-hidden rounded-lg bg-background">
                           <img src={image.thumbnail_url || image.url} alt={image.name} loading="lazy" decoding="async" className="h-full w-full object-cover" />
-                        </a>
+                        </button>
                       ))}
                     </div>
                     <div className="space-y-1 p-2">
@@ -232,6 +284,15 @@ export default function ProfilePage() {
                         <Folder className="size-3.5 shrink-0" />
                         <span className="truncate">{entry.title}</span>
                       </div>
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-1 rounded-lg border border-border px-2 py-1 text-[11px] font-medium hover:bg-muted"
+                        onClick={() => void downloadPaths(entry.items.map((image) => image.rel), `${entry.title || entry.id}.zip`)}
+                        disabled={isDownloading}
+                      >
+                        <Download className="size-3" />
+                        打包下载
+                      </button>
                       <div className="text-[11px] text-muted-foreground">收纳盒 · {entry.count} 张</div>
                     </div>
                   </div>
@@ -239,20 +300,30 @@ export default function ProfilePage() {
               }
               const image = entry.item;
               return (
-                <a key={image.rel} href={image.url} target="_blank" rel="noreferrer" className="overflow-hidden rounded-xl border border-border bg-background">
+                <button key={image.rel} type="button" onClick={() => openImages(data?.images || [], Math.max(0, allLightboxImages.findIndex((item) => item.id === image.rel)))} className="overflow-hidden rounded-xl border border-border bg-background text-left">
                   <div className="aspect-square bg-muted">
                     <img src={image.thumbnail_url || image.url} alt={image.name} loading="lazy" decoding="async" className="h-full w-full object-cover" />
                   </div>
                   <div className="space-y-1 p-2">
                     <div className="truncate text-xs font-semibold">{image.name}</div>
-                    <div className="text-[11px] text-muted-foreground">{image.created_at}</div>
+                    <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                      <span>{image.created_at}</span>
+                      <Maximize2 className="size-3.5 text-muted-foreground" />
+                    </div>
                   </div>
-                </a>
+                </button>
               );
             })
           )}
         </div>
       </section>
+      <ImageLightbox
+        images={lightboxImages}
+        currentIndex={lightboxIndex}
+        open={lightboxOpen}
+        onOpenChange={setLightboxOpen}
+        onIndexChange={setLightboxIndex}
+      />
     </main>
   );
 }

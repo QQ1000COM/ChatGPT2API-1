@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from services.config import DATA_DIR
 from services.persistent_store import append_line, read_text, write_text
-from utils.helper import anthropic_sse_stream, sse_json_stream
+from utils.helper import anthropic_sse_stream, responses_sse_stream, sse_json_stream
 
 LOG_TYPE_CALL = "call"
 LOG_TYPE_ACCOUNT = "account"
@@ -229,7 +229,12 @@ class LoggedCall:
             self.log("调用完成", result)
             return result
 
-        sender = anthropic_sse_stream if sse == "anthropic" else sse_json_stream
+        if sse == "anthropic":
+            sender = anthropic_sse_stream
+        elif sse == "responses":
+            sender = responses_sse_stream
+        else:
+            sender = sse_json_stream
         try:
             has_first, first = await run_in_threadpool(_next_item, result)
         except ImageGenerationError as exc:

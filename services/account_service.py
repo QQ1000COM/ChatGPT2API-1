@@ -46,6 +46,51 @@ class AccountService:
             return True
         return int(account.get("quota") or 0) > 0
 
+    @staticmethod
+    def _normalize_account_type(value: object) -> str:
+        raw = str(value or "").strip()
+        normalized = raw.lower().replace("-", "_").replace(" ", "_")
+        compact = normalized.replace("_", "")
+        aliases = {
+            "prolite": "ProLite",
+            "plus": "Plus",
+            "pro": "Pro",
+            "team": "Team",
+            "enterprise": "Enterprise",
+            "free": "free",
+        }
+        return aliases.get(compact, raw or "free")
+
+    def _search_account_type(self, payload: object) -> str | None:
+        account_type_keys = {
+            "account_type",
+            "accounttype",
+            "plan_type",
+            "plantype",
+            "plan",
+            "product_type",
+            "producttype",
+            "subscription_plan",
+            "subscriptionplan",
+            "tier",
+        }
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                key_text = str(key or "").strip().lower().replace("-", "_")
+                if key_text in account_type_keys and isinstance(value, (str, int, float)):
+                    account_type = self._normalize_account_type(value)
+                    if account_type and account_type != "free":
+                        return account_type
+                found = self._search_account_type(value)
+                if found:
+                    return found
+        elif isinstance(payload, list):
+            for item in payload:
+                found = self._search_account_type(item)
+                if found:
+                    return found
+        return None
+
     def _normalize_account(self, item: dict) -> dict | None:
         if not isinstance(item, dict):
             return None
@@ -54,7 +99,7 @@ class AccountService:
             return None
         normalized = dict(item)
         normalized["access_token"] = access_token
-        normalized["type"] = normalized.get("type") or "free"
+        normalized["type"] = self._normalize_account_type(normalized.get("type") or self._search_account_type(item) or "free")
         normalized["status"] = normalized.get("status") or "正常"
         normalized["quota"] = max(0, int(normalized.get("quota") if normalized.get("quota") is not None else 0))
         # initial_quota：注册时拿到的总额度。每次 normalize 取 max(已有, 当前 quota)，

@@ -5,6 +5,13 @@ from typing import Any
 from services.openai_backend_api import OpenAIBackendAPI
 from utils.helper import IMAGE_MODELS
 
+CODEX_MODELS = {
+    "gpt-5.1-codex",
+    "gpt-5-codex",
+    "gpt-5-codex-mini",
+    "codex-mini-latest",
+}
+
 
 def list_models() -> dict[str, Any]:
     result = OpenAIBackendAPI().list_models()
@@ -12,7 +19,7 @@ def list_models() -> dict[str, Any]:
     if not isinstance(data, list):
         return result
     seen = {str(item.get("id") or "").strip() for item in data if isinstance(item, dict)}
-    for model in sorted(IMAGE_MODELS):
+    for model in sorted({*IMAGE_MODELS, *CODEX_MODELS}):
         if model not in seen:
             data.append({
                 "id": model,

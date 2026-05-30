@@ -1,8 +1,9 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Download,
+  Layers,
   LoaderCircle,
   Plus,
   RefreshCw,
@@ -10,14 +11,17 @@ import {
   WandSparkles,
   X,
 } from "lucide-react";
+import { writePsd } from "ag-psd";
+import type { Layer } from "ag-psd";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { createImageEditTask, downloadImages, fetchImageTasks, type ImageTask } from "@/lib/api";
+import { createChatCompletion, createImageEditTask, downloadImages, fetchImageTasks, fetchMyIdentity, type ImageTask } from "@/lib/api";
+import { parseSkuVariants, type SkuVariant } from "@/lib/sku-variants";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 
-type WorkMode = "detail" | "main" | "buyer" | "white" | "resize" | "replace";
+type WorkMode = "detail" | "main" | "buyer" | "white" | "resize" | "replace" | "psd" | "sku" | "ab" | "competitor" | "points";
 type UploadKind = "product" | "reference" | "background" | "resize";
 type JobStatus = "idle" | "queued" | "running" | "success" | "error" | "canceled";
 
@@ -26,6 +30,22 @@ type UploadImage = {
   file: File;
   dataUrl: string;
 };
+
+type SkuSlot = {
+  id: string;
+  name: string;
+  spec: string;
+  productImages: UploadImage[];
+};
+
+type StoredSkuSlot = {
+  id: string;
+  name: string;
+  spec: string;
+  productImages: StoredUploadImage[];
+};
+
+type SkuReferenceStrength = "loose" | "balanced" | "strict";
 
 type ResizePreset = {
   id: string;
@@ -50,12 +70,114 @@ type GeneratedItem = {
   sourceName?: string;
   referenceFile?: File;
   referenceName?: string;
+  extraFiles?: File[];
+  groupId?: string;
+  groupTitle?: string;
+  groupIndex?: number;
+};
+
+type PsdLayerPreview = {
+  id: string;
+  name: string;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  pixels: number;
+  canvas: HTMLCanvasElement;
+  dataUrl: string;
+};
+
+type StoredUploadImage = {
+  id: string;
+  name: string;
+  type: string;
+  dataUrl: string;
+};
+
+type SkuTaskSpec = SkuVariant & {
+  extraFiles: File[];
+  referenceStrength: SkuReferenceStrength;
+  keepSubject: boolean;
+};
+
+type CommerceProject = {
+  id: string;
+  name: string;
+  updatedAt: number;
+  mode: WorkMode;
+  productName: string;
+  category: string;
+  sellingPoints: string;
+  platform: string;
+  region: string;
+  language: string;
+  style: string;
+  audience: string;
+  priceBand: string;
+  extra: string;
+  usageScene: string;
+  skuText: string;
+  skuSharedReferenceImages?: StoredUploadImage[];
+  skuSlots?: StoredSkuSlot[];
+  productImages: StoredUploadImage[];
+  referenceImages: StoredUploadImage[];
+  backgroundImages: StoredUploadImage[];
+  resizeImages: StoredUploadImage[];
+};
+
+type HistoryRecord = {
+  id: string;
+  createdAt: number;
+  mode: WorkMode;
+  title: string;
+  subtitle: string;
+  prompt: string;
+  imageUrl: string;
+  projectName: string;
 };
 
 const platforms = ["淘宝/天猫", "京东", "拼多多", "抖音小店", "小红书", "Amazon"];
 const regions = ["中国大陆", "中国港澳台", "东南亚", "北美", "欧洲", "日本", "韩国"];
 const languages = ["中文", "英文", "中英双语", "日文", "韩文", "泰文", "越南文"];
 const styles = ["高级简洁", "爆款促销", "小红书种草", "科技质感", "母婴温暖", "轻奢礼盒", "极简白底"];
+const workModes: Array<{ value: WorkMode; label: string }> = [
+  { value: "detail", label: "详情页分页" },
+  { value: "main", label: "爆款主图" },
+  { value: "buyer", label: "买家秀" },
+  { value: "white", label: "白底图" },
+  { value: "replace", label: "批量替换主体" },
+  { value: "resize", label: "尺寸转换" },
+  { value: "sku", label: "批量 SKU 出图" },
+  { value: "ab", label: "A/B 测试图" },
+  { value: "competitor", label: "竞品图复刻增强" },
+];
+const PROJECTS_KEY = "chatgpt2api:commerce_projects:v1";
+const HISTORY_KEY = "chatgpt2api:commerce_history:v1";
+const abVariantPrompts = [
+  "A/B 版本策略：强点击大主体，移动端缩略图优先，主体更大更醒目。",
+  "A/B 版本策略：高端质感，减少元素，强调材质、光影和品牌感。",
+  "A/B 版本策略：促销转化，突出核心利益点和活动氛围，但不夸大宣传。",
+  "A/B 版本策略：内容种草，场景更生活化，适合小红书/抖音种草入口。",
+  "A/B 版本策略：差异化构图，改变机位、留白和视觉重心，用于点击率测试。",
+];
+const skuReferenceStrengthOptions: Array<{ value: SkuReferenceStrength; label: string; prompt: string }> = [
+  {
+    value: "loose",
+    label: "低参考",
+    prompt: "参考程度：低。只参考参考图中的颜色方向、产品类型和大致质感，不复刻版式、背景、文案、图标、装饰元素或构图，避免与参考图过度相似。",
+  },
+  {
+    value: "balanced",
+    label: "中参考",
+    prompt: "参考程度：中。参考 SKU 颜色、材质和产品识别特征，但重新设计背景、道具、光影、文案排版和构图，避免直接复刻参考图。",
+  },
+  {
+    value: "strict",
+    label: "高参考",
+    prompt: "参考程度：高。尽量保持 SKU 颜色、材质、形态和核心卖点一致，但仍必须重做背景、构图、文字、装饰和视觉版式，不能照搬原图。",
+  },
+];
 const resizePresets: ResizePreset[] = [
   { id: "1:1", ratio: "1:1", label: "正方形", orientation: "" },
   { id: "16:9", ratio: "16:9", label: "横版", orientation: "横版" },
@@ -92,11 +214,34 @@ const buyerBackgroundModes = [
 ];
 const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
+async function runWithConcurrency<T, R>(items: T[], limit: number, worker: (item: T, index: number) => Promise<R>) {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+  const runners = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await worker(items[index], index);
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
+
 function createId() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();
   }
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function createSkuSlot(index: number): SkuSlot {
+  return {
+    id: createId(),
+    name: "",
+    spec: "",
+    productImages: [],
+  };
 }
 
 function readFileAsDataUrl(file: File) {
@@ -118,6 +263,56 @@ async function filesToUploadImages(files: File[]) {
         dataUrl: await readFileAsDataUrl(file),
       })),
   );
+}
+
+function readStoredList<T>(key: string, fallback: T): T {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const value = window.localStorage.getItem(key);
+    return value ? (JSON.parse(value) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStoredList<T>(key: string, value: T) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // 忽略本地存储容量不足，不影响出图主流程。
+  }
+}
+
+function storedImages(images: UploadImage[]): StoredUploadImage[] {
+  return images.map((image) => ({
+    id: image.id,
+    name: image.file.name,
+    type: image.file.type || "image/png",
+    dataUrl: image.dataUrl,
+  }));
+}
+
+async function storedToUploadImages(images: StoredUploadImage[]): Promise<UploadImage[]> {
+  return Promise.all(
+    images.map(async (image) => {
+      const response = await fetch(image.dataUrl);
+      const blob = await response.blob();
+      return {
+        id: image.id || createId(),
+        file: new File([blob], image.name || "image.png", { type: image.type || blob.type || "image/png" }),
+        dataUrl: image.dataUrl,
+      };
+    }),
+  );
+}
+
+function parseLines(value: string) {
+  return value
+    .split(/\r?\n|[,，]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 20);
 }
 
 function imageSource(item: GeneratedItem) {
@@ -296,7 +491,7 @@ function buildDetailItems(form: Parameters<typeof basePrompt>[0], size: string):
     },
   ];
 
-  return specs.slice(0, 2).map((spec) => ({
+  return specs.map((spec) => ({
     id: createId(),
     title: spec.title,
     subtitle: spec.subtitle,
@@ -518,6 +713,88 @@ function buildResizeItems(images: UploadImage[], selectedRatios: string[]): Gene
   );
 }
 
+function promptEnhancement(options: {
+  mode: WorkMode;
+  sku: SkuTaskSpec | null;
+  abIndex: number;
+  competitorStrength: "standard" | "strong" | "strict";
+}) {
+  const parts: string[] = [];
+  if (options.sku) {
+    const dimensionText = options.sku.dimensions.length
+      ? options.sku.dimensions.map((item) => `${item.name}:${item.value}`).join("；")
+      : options.sku.label;
+    parts.push([
+      `SKU/规格组合：${options.sku.label}。`,
+      options.sku.color ? `颜色必须匹配：${options.sku.color}。` : "",
+      options.sku.specs.length ? `规格名必须匹配：${options.sku.specs.join("、")}。` : "",
+      `维度明细：${dimensionText}。`,
+      skuReferenceStrengthOptions.find((item) => item.value === options.sku?.referenceStrength)?.prompt || skuReferenceStrengthOptions[1].prompt,
+      options.sku.keepSubject
+        ? "保持产品主体不变：必须以本 SKU 上传的对应规格商品图为主体，严格保留商品轮廓、结构、比例、材质、Logo/纹理位置、按键/接口/零件数量和关键细节，只允许围绕该规格做光影、背景、构图和电商视觉优化。"
+        : "",
+      "本张图必须围绕这个 SKU 生成，保持上传商品的结构、比例、Logo/纹理和关键细节一致，只允许按 SKU 改变颜色、容量、尺寸、包装、配件或文案。",
+      "如果提供了统一 SKU 参考图，只参考颜色、材质、产品形态和 SKU 差异点；不要复制参考图的品牌、Logo、水印、文案、排版、背景、道具或完整构图，避免盗图和版权风险。",
+      "如果同一批有多个颜色或规格，所有图的构图、视角、光影和背景风格应保持一致，方便作为同一商品 SKU 套图使用。",
+    ].filter(Boolean).join("\n"));
+  }
+  if (options.mode === "competitor" && options.competitorStrength !== "standard") {
+    parts.push(options.competitorStrength === "strict"
+      ? "竞品图复刻增强：严格解析参考图的主体位置、视角、景别、背景层次、文字区、安全留白、色彩和光影，只替换为我的商品，不复制竞品品牌、Logo、二维码和侵权元素。"
+      : "竞品图复刻增强：参考竞品图的构图、视觉重心、光线、道具关系和转化氛围，同时保持我的商品真实一致，规避原品牌和水印。");
+  }
+  if (options.mode === "ab" && options.abIndex > 0) {
+    parts.push(abVariantPrompts[options.abIndex % abVariantPrompts.length]);
+  }
+  return parts.filter(Boolean).join("\n");
+}
+
+function expandProductionItems(
+  baseItems: GeneratedItem[],
+  options: {
+    mode: WorkMode;
+    skuText: string;
+    skuSpecs?: SkuTaskSpec[];
+    skuReferenceStrength?: SkuReferenceStrength;
+    abCount: number;
+    competitorStrength: "standard" | "strong" | "strict";
+  },
+) {
+  const skuVariants = options.skuSpecs?.length ? options.skuSpecs : parseSkuVariants(options.skuText).map((sku) => ({
+    ...sku,
+    extraFiles: [],
+    referenceStrength: options.skuReferenceStrength || "balanced",
+    keepSubject: false,
+  }));
+  const skuValues = options.mode === "sku" ? (skuVariants.length ? skuVariants : [null]) : [null];
+  const abValues = options.mode === "ab" ? Array.from({ length: Math.max(1, Math.min(5, options.abCount)) }, (_, index) => index) : [0];
+  const expanded: GeneratedItem[] = [];
+  for (const item of baseItems) {
+    for (const sku of skuValues) {
+      for (const abIndex of abValues) {
+        const skuLabel = sku?.label || "";
+        const suffix = [skuLabel, options.mode === "ab" && abValues.length > 1 ? `AB${abIndex + 1}` : ""].filter(Boolean);
+        const extraPrompt = promptEnhancement({
+          mode: options.mode,
+          sku,
+          abIndex,
+          competitorStrength: options.competitorStrength,
+        });
+        expanded.push({
+          ...item,
+          id: createId(),
+          title: suffix.length ? `${item.title} ${suffix.join(" ")}` : item.title,
+          subtitle: suffix.length ? `${item.subtitle} / ${suffix.join(" / ")}` : item.subtitle,
+          prompt: extraPrompt ? `${item.prompt}\n\n${extraPrompt}` : item.prompt,
+          status: "idle",
+          extraFiles: sku?.extraFiles,
+        });
+      }
+    }
+  }
+  return expanded.slice(0, 40);
+}
+
 async function pollTask(taskId: string) {
   let missingCount = 0;
   for (let index = 0; index < 120; index += 1) {
@@ -695,6 +972,256 @@ async function downloadItemsZip(items: GeneratedItem[], filename: string) {
   URL.revokeObjectURL(url);
 }
 
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+async function imageSourceToCanvas(src: string, width?: number, height?: number) {
+  const image = await sourceToDrawable(src);
+  const naturalWidth = image.naturalWidth || image.width;
+  const naturalHeight = image.naturalHeight || image.height;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(width || naturalWidth));
+  canvas.height = Math.max(1, Math.round(height || naturalHeight));
+  const context = canvas.getContext("2d");
+  if (!context) {
+    throw new Error("浏览器不支持 PSD 图层合成");
+  }
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  return { canvas, width: canvas.width, height: canvas.height, naturalWidth, naturalHeight };
+}
+
+function imageSourceFromTask(task: ImageTask) {
+  const first = task.data?.[0];
+  if (!first) return "";
+  if (first.local_url) return first.local_url;
+  if (first.b64_json) return `data:image/png;base64,${first.b64_json}`;
+  return first.url || "";
+}
+
+function isNearWhite(r: number, g: number, b: number, a: number) {
+  if (a < 20) return true;
+  const spread = Math.max(r, g, b) - Math.min(r, g, b);
+  return r >= 238 && g >= 238 && b >= 238 && spread <= 28;
+}
+
+function removeWhiteBackground(source: HTMLCanvasElement) {
+  const canvas = document.createElement("canvas");
+  canvas.width = source.width;
+  canvas.height = source.height;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) {
+    throw new Error("浏览器不支持图片拆层");
+  }
+  context.drawImage(source, 0, 0);
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  const { data, width, height } = imageData;
+  const background = new Uint8Array(width * height);
+  const stack: number[] = [];
+  const pushIfBackground = (x: number, y: number) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) return;
+    const index = y * width + x;
+    if (background[index]) return;
+    const offset = index * 4;
+    if (!isNearWhite(data[offset], data[offset + 1], data[offset + 2], data[offset + 3])) return;
+    background[index] = 1;
+    stack.push(index);
+  };
+  for (let x = 0; x < width; x += 1) {
+    pushIfBackground(x, 0);
+    pushIfBackground(x, height - 1);
+  }
+  for (let y = 0; y < height; y += 1) {
+    pushIfBackground(0, y);
+    pushIfBackground(width - 1, y);
+  }
+  while (stack.length) {
+    const index = stack.pop() as number;
+    const x = index % width;
+    const y = Math.floor(index / width);
+    pushIfBackground(x + 1, y);
+    pushIfBackground(x - 1, y);
+    pushIfBackground(x, y + 1);
+    pushIfBackground(x, y - 1);
+  }
+  for (let index = 0; index < background.length; index += 1) {
+    if (background[index]) {
+      data[index * 4 + 3] = 0;
+    }
+  }
+  context.putImageData(imageData, 0, 0);
+  return canvas;
+}
+
+function applyMaskToOriginal(original: HTMLCanvasElement, mask: HTMLCanvasElement) {
+  const canvas = document.createElement("canvas");
+  canvas.width = original.width;
+  canvas.height = original.height;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) {
+    throw new Error("浏览器不支持图片拆层");
+  }
+  context.drawImage(original, 0, 0);
+  const originalData = context.getImageData(0, 0, canvas.width, canvas.height);
+
+  const maskCanvas = document.createElement("canvas");
+  maskCanvas.width = original.width;
+  maskCanvas.height = original.height;
+  const maskContext = maskCanvas.getContext("2d", { willReadFrequently: true });
+  if (!maskContext) {
+    throw new Error("浏览器不支持图片拆层");
+  }
+  maskContext.drawImage(mask, 0, 0, original.width, original.height);
+  const maskData = maskContext.getImageData(0, 0, original.width, original.height);
+
+  for (let offset = 0; offset < originalData.data.length; offset += 4) {
+    const maskR = maskData.data[offset];
+    const maskG = maskData.data[offset + 1];
+    const maskB = maskData.data[offset + 2];
+    const maskA = maskData.data[offset + 3];
+    if (maskA < 28 || isNearWhite(maskR, maskG, maskB, maskA)) {
+      originalData.data[offset + 3] = 0;
+    }
+  }
+  context.putImageData(originalData, 0, 0);
+  return removeWhiteBackground(canvas);
+}
+
+function splitCanvasIntoLayers(source: HTMLCanvasElement, baseName: string, strength: "soft" | "normal" | "strong" = "normal") {
+  const context = source.getContext("2d", { willReadFrequently: true });
+  if (!context) {
+    throw new Error("浏览器不支持图片拆层");
+  }
+  const width = source.width;
+  const height = source.height;
+  const imageData = context.getImageData(0, 0, width, height);
+  const { data } = imageData;
+  const visited = new Uint8Array(width * height);
+  const minPixelRatio = strength === "strong" ? 0.00012 : strength === "soft" ? 0.0008 : 0.00035;
+  const minPixels = Math.max(strength === "strong" ? 24 : 80, Math.floor(width * height * minPixelRatio));
+  const components: Array<{ pixels: number[]; left: number; top: number; right: number; bottom: number }> = [];
+
+  const isSolid = (index: number) => data[index * 4 + 3] > 28;
+  for (let start = 0; start < visited.length; start += 1) {
+    if (visited[start] || !isSolid(start)) continue;
+    const stack = [start];
+    const pixels: number[] = [];
+    visited[start] = 1;
+    let left = start % width;
+    let right = left;
+    let top = Math.floor(start / width);
+    let bottom = top;
+    while (stack.length) {
+      const index = stack.pop() as number;
+      pixels.push(index);
+      const x = index % width;
+      const y = Math.floor(index / width);
+      if (x < left) left = x;
+      if (x > right) right = x;
+      if (y < top) top = y;
+      if (y > bottom) bottom = y;
+      const neighbors = [index + 1, index - 1, index + width, index - width];
+      for (const next of neighbors) {
+        if (next < 0 || next >= visited.length || visited[next] || !isSolid(next)) continue;
+        const nx = next % width;
+        const ny = Math.floor(next / width);
+        if (Math.abs(nx - x) + Math.abs(ny - y) !== 1) continue;
+        visited[next] = 1;
+        stack.push(next);
+      }
+    }
+    if (pixels.length >= minPixels) {
+      components.push({ pixels, left, top, right, bottom });
+    }
+  }
+
+  const sorted = components
+    .sort((a, b) => a.top - b.top || a.left - b.left)
+    .slice(0, strength === "strong" ? 64 : strength === "soft" ? 20 : 32);
+
+  const layers = sorted.map((component, index) => {
+    const layerWidth = component.right - component.left + 1;
+    const layerHeight = component.bottom - component.top + 1;
+    const canvas = document.createElement("canvas");
+    canvas.width = layerWidth;
+    canvas.height = layerHeight;
+    const layerContext = canvas.getContext("2d");
+    if (!layerContext) {
+      throw new Error("浏览器不支持 PSD 图层合成");
+    }
+    const layerData = layerContext.createImageData(layerWidth, layerHeight);
+    for (const pixel of component.pixels) {
+      const x = pixel % width;
+      const y = Math.floor(pixel / width);
+      const sourceOffset = pixel * 4;
+      const targetOffset = ((y - component.top) * layerWidth + (x - component.left)) * 4;
+      layerData.data[targetOffset] = data[sourceOffset];
+      layerData.data[targetOffset + 1] = data[sourceOffset + 1];
+      layerData.data[targetOffset + 2] = data[sourceOffset + 2];
+      layerData.data[targetOffset + 3] = data[sourceOffset + 3];
+    }
+    layerContext.putImageData(layerData, 0, 0);
+    return {
+      id: createId(),
+      name: `${String(index + 1).padStart(2, "0")}-${baseName}`,
+      left: component.left,
+      top: component.top,
+      width: layerWidth,
+      height: layerHeight,
+      pixels: component.pixels.length,
+      canvas,
+      dataUrl: canvas.toDataURL("image/png"),
+    };
+  });
+
+  if (layers.length === 0) {
+    const canvas = document.createElement("canvas");
+    canvas.width = source.width;
+    canvas.height = source.height;
+    const layerContext = canvas.getContext("2d");
+    if (!layerContext) {
+      throw new Error("浏览器不支持 PSD 图层合成");
+    }
+    layerContext.drawImage(source, 0, 0);
+    layers.push({
+      id: createId(),
+      name: `01-${baseName}`,
+      left: 0,
+      top: 0,
+      width: source.width,
+      height: source.height,
+      pixels: source.width * source.height,
+      canvas,
+      dataUrl: canvas.toDataURL("image/png"),
+    });
+  }
+
+  return layers;
+}
+
+function createPsdBlobFromLayers(layers: PsdLayerPreview[], width: number, height: number) {
+  const psdLayers: Layer[] = layers.map((layer) => ({
+    name: layer.name,
+    top: layer.top,
+    left: layer.left,
+    bottom: layer.top + layer.height,
+    right: layer.left + layer.width,
+    canvas: layer.canvas,
+  }));
+  const buffer = writePsd({
+    width,
+    height,
+    children: psdLayers,
+  });
+  return new Blob([buffer], { type: "image/vnd.adobe.photoshop" });
+}
+
 function UploadStrip({
   title,
   images,
@@ -737,12 +1264,33 @@ function UploadStrip({
   );
 }
 
+function FeaturePanel({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="rounded-2xl border border-border bg-background p-3">
+      <div className="mb-3">
+        <div className="text-sm font-semibold text-foreground">{title}</div>
+        {description ? <div className="mt-1 text-xs leading-5 text-muted-foreground">{description}</div> : null}
+      </div>
+      {children}
+    </section>
+  );
+}
+
 export default function DetailPageGenerator() {
   const { isCheckingAuth, session } = useAuthGuard();
   const productInputRef = useRef<HTMLInputElement>(null);
   const referenceInputRef = useRef<HTMLInputElement>(null);
   const backgroundInputRef = useRef<HTMLInputElement>(null);
   const resizeInputRef = useRef<HTMLInputElement>(null);
+  const skuUploadInputRef = useRef<HTMLInputElement>(null);
   const [mode, setMode] = useState<WorkMode>("detail");
   const [productImages, setProductImages] = useState<UploadImage[]>([]);
   const [referenceImages, setReferenceImages] = useState<UploadImage[]>([]);
@@ -774,6 +1322,22 @@ export default function DetailPageGenerator() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [regeneratingItemIds, setRegeneratingItemIds] = useState<string[]>([]);
   const [selectedResizeRatios, setSelectedResizeRatios] = useState<string[]>([]);
+  const [psdLayers, setPsdLayers] = useState<PsdLayerPreview[]>([]);
+  const [psdCanvasSize, setPsdCanvasSize] = useState<{ width: number; height: number } | null>(null);
+  const [projectName, setProjectName] = useState("");
+  const [projects, setProjects] = useState<CommerceProject[]>(() => readStoredList<CommerceProject[]>(PROJECTS_KEY, []));
+  const [historyRecords, setHistoryRecords] = useState<HistoryRecord[]>(() => readStoredList<HistoryRecord[]>(HISTORY_KEY, []));
+  const [skuText, setSkuText] = useState("");
+  const [skuSharedReferenceImages, setSkuSharedReferenceImages] = useState<UploadImage[]>([]);
+  const [skuReferenceStrength, setSkuReferenceStrength] = useState<SkuReferenceStrength>("balanced");
+  const [skuKeepSubject, setSkuKeepSubject] = useState(true);
+  const [skuSlots, setSkuSlots] = useState<SkuSlot[]>(() => [createSkuSlot(0)]);
+  const [abCount, setAbCount] = useState(2);
+  const [competitorStrength, setCompetitorStrength] = useState<"standard" | "strong" | "strict">("strong");
+  const [psdSplitStrength, setPsdSplitStrength] = useState<"soft" | "normal" | "strong">("normal");
+  const [historyCompareIds, setHistoryCompareIds] = useState<string[]>([]);
+  const [isExtractingPoints, setIsExtractingPoints] = useState(false);
+  const [commercePermissions, setCommercePermissions] = useState<string[] | null>(null);
 
   const allFiles = useMemo(
     () => [...productImages.map((image) => image.file), ...referenceImages.map((image) => image.file)],
@@ -789,6 +1353,38 @@ export default function DetailPageGenerator() {
   );
   const completeCount = items.filter((item) => item.status === "success").length;
   const activeCount = items.filter((item) => item.status === "queued" || item.status === "running").length;
+  const skuTaskSpecs = useMemo<SkuTaskSpec[]>(() => {
+    const specs: SkuTaskSpec[] = [];
+    skuSlots.forEach((slot, index) => {
+      const name = slot.name.trim();
+      const spec = slot.spec.trim();
+      const hasAnyValue =
+        name ||
+        spec ||
+        slot.productImages.length > 0;
+      if (!hasAnyValue) {
+        return;
+      }
+      const label = [name || `SKU ${index + 1}`, spec].filter(Boolean).join(" ");
+      specs.push({
+        label,
+        raw: label,
+        color: name || undefined,
+        specs: spec ? [spec] : [],
+        dimensions: [
+          name ? { name: "颜色/SKU", value: name } : null,
+          spec ? { name: "规格", value: spec } : null,
+        ].filter((item): item is { name: string; value: string } => Boolean(item)),
+        extraFiles: [
+          ...slot.productImages.map((image) => image.file),
+          ...skuSharedReferenceImages.map((image) => image.file),
+        ],
+        referenceStrength: skuReferenceStrength,
+        keepSubject: skuKeepSubject,
+      });
+    });
+    return specs.slice(0, 6);
+  }, [skuKeepSubject, skuReferenceStrength, skuSharedReferenceImages, skuSlots]);
   const totalCount =
     mode === "detail"
       ? 6
@@ -800,10 +1396,42 @@ export default function DetailPageGenerator() {
             ? 2
             : mode === "replace"
               ? productImages.length * referenceImages.length
+              : mode === "sku"
+                ? Math.max(1, skuTaskSpecs.length)
+                : mode === "ab"
+                  ? Math.max(1, Math.min(5, abCount))
+                  : mode === "competitor"
+                    ? 2
+                    : mode === "points"
+                      ? 1
+              : mode === "psd"
+                ? resizeImages.length
               : resizeImages.length * selectedResizeRatios.length;
   const canStitchDetail =
     mode === "detail" && items.length === 6 && items.every((item) => item.status === "success" && imageSource(item));
   const canDownloadZip = items.some((item) => item.status === "success" && imageSource(item));
+  const visibleModes = workModes.filter((item) => session?.role === "admin" || commercePermissions === null || commercePermissions.includes(item.value));
+  const currentModeAllowed = session?.role === "admin" || commercePermissions === null || commercePermissions.includes(mode);
+
+  useEffect(() => {
+    let active = true;
+    void fetchMyIdentity()
+      .then((data) => {
+        if (!active) return;
+        const permissions = data.identity.role === "admin" ? workModes.map((item) => item.value) : data.identity.commerce_permissions ?? [];
+        setCommercePermissions(permissions);
+        if (!permissions.includes(mode)) {
+          setMode((permissions[0] as WorkMode | undefined) ?? "detail");
+          setItems([]);
+        }
+      })
+      .catch(() => {
+        if (active) setCommercePermissions([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [mode]);
 
   const addImages = async (kind: UploadKind, files: File[]) => {
     const images = await filesToUploadImages(files);
@@ -815,7 +1443,11 @@ export default function DetailPageGenerator() {
     } else if (kind === "background") {
       setBackgroundImages(images.slice(0, 1));
     } else {
-      setResizeImages((prev) => [...prev, ...images].slice(0, 20));
+      setResizeImages((prev) => (mode === "psd" ? images.slice(0, 1) : [...prev, ...images].slice(0, 20)));
+      if (mode === "psd") {
+        setPsdLayers([]);
+        setPsdCanvasSize(null);
+      }
     }
   };
 
@@ -828,15 +1460,79 @@ export default function DetailPageGenerator() {
       setBackgroundImages((prev) => prev.filter((item) => item.id !== id));
     } else {
       setResizeImages((prev) => prev.filter((item) => item.id !== id));
+      if (mode === "psd") {
+        setPsdLayers([]);
+        setPsdCanvasSize(null);
+      }
     }
+  };
+
+  const addSkuImages = async (files: File[]) => {
+    const images = await filesToUploadImages(files);
+    if (images.length === 0) return;
+    setSkuSharedReferenceImages((prev) => [...prev, ...images].slice(0, 6));
+  };
+
+  const updateSkuSlot = (id: string, updates: Partial<Pick<SkuSlot, "name" | "spec">>) => {
+    setSkuSlots((prev) => prev.map((slot) => (slot.id === id ? { ...slot, ...updates } : slot)));
+  };
+
+  const addSkuSlot = () => {
+    setSkuSlots((prev) => (prev.length >= 6 ? prev : [...prev, createSkuSlot(prev.length)]));
+  };
+
+  const removeSkuSlot = (slotId: string) => {
+    setSkuSlots((prev) => (prev.length <= 1 ? prev : prev.filter((slot) => slot.id !== slotId)));
+  };
+
+  const addSkuProductImages = async (slotId: string, files: File[]) => {
+    const images = await filesToUploadImages(files);
+    if (images.length === 0) return;
+    setSkuSlots((prev) =>
+      prev.map((slot) => (
+        slot.id === slotId
+          ? { ...slot, productImages: [...slot.productImages, ...images].slice(0, 6) }
+          : slot
+      )),
+    );
+  };
+
+  const removeSkuProductImage = (slotId: string, imageId: string) => {
+    setSkuSlots((prev) =>
+      prev.map((slot) => (
+        slot.id === slotId
+          ? { ...slot, productImages: slot.productImages.filter((image) => image.id !== imageId) }
+          : slot
+      )),
+    );
   };
 
   const updateItem = (id: string, updater: (item: GeneratedItem) => GeneratedItem) => {
     setItems((prev) => prev.map((item) => (item.id === id ? updater(item) : item)));
   };
 
+  const appendHistory = (records: GeneratedItem[]) => {
+    const successful = records
+      .filter((item) => item.status === "success" && imageSource(item))
+      .map((item) => ({
+        id: createId(),
+        createdAt: Date.now(),
+        mode,
+        title: item.title,
+        subtitle: item.subtitle,
+        prompt: item.prompt,
+        imageUrl: imageSource(item),
+        projectName: projectName.trim() || productName.trim() || "未命名项目",
+      }));
+    if (!successful.length) return;
+    setHistoryRecords((prev) => {
+      const next = [...successful, ...prev].slice(0, 80);
+      writeStoredList(HISTORY_KEY, next);
+      return next;
+    });
+  };
+
   const runItemTask = async (item: GeneratedItem) => {
-    let succeeded = false;
     updateItem(item.id, (current) => ({
       ...current,
       status: "queued",
@@ -857,6 +1553,12 @@ export default function DetailPageGenerator() {
                 ? "white"
                 : mode === "replace"
                   ? "replace"
+                  : mode === "sku"
+                    ? "sku"
+                    : mode === "ab"
+                      ? "ab"
+                      : mode === "competitor"
+                        ? "competitor"
                   : "resize";
       const taskId = `${taskPrefix}-${createId()}`;
       const taskFiles =
@@ -870,23 +1572,46 @@ export default function DetailPageGenerator() {
             ? productImages.map((image) => image.file)
             : mode === "buyer"
               ? buyerFiles
-              : allFiles;
-      const submitted = await createImageEditTask(taskId, taskFiles, item.prompt, "gpt-image-2", item.size);
+            : mode === "sku"
+              ? item.extraFiles || []
+            : allFiles;
+      const taskGroup = item.groupId
+        ? {
+            group_id: item.groupId,
+            group_title: item.groupTitle || `${productName.trim() || "电商出图"} 批量任务`,
+            group_index: item.groupIndex ?? 0,
+          }
+        : undefined;
+      const submitted = await createImageEditTask(taskId, taskFiles, item.prompt, "gpt-image-2", item.size, taskGroup, mode);
       updateItem(item.id, (current) => applyTaskToItem(current, submitted));
       const finished = await pollTask(submitted.id);
-      succeeded = finished.status === "success";
-      updateItem(item.id, (current) => applyTaskToItem(current, finished));
+      const nextItem = applyTaskToItem(item, finished);
+      updateItem(item.id, () => nextItem);
+      return nextItem;
     } catch (error) {
-      updateItem(item.id, (current) => ({
-        ...current,
+      const failedItem = {
+        ...item,
         status: "error",
         error: error instanceof Error ? error.message : "生成失败",
-      }));
+      } as GeneratedItem;
+      updateItem(item.id, () => failedItem);
+      return failedItem;
     }
-    return succeeded;
   };
 
   const handleGenerate = async () => {
+    if (!currentModeAllowed) {
+      toast.error("当前账号没有这个电商功能权限，请联系管理员开启");
+      return;
+    }
+    if (mode === "points") {
+      await handleExtractSellingPoints();
+      return;
+    }
+    if (mode === "psd") {
+      await handleDownloadUploadedPsd();
+      return;
+    }
     if (mode === "resize") {
       if (resizeImages.length === 0) {
         toast.error("请先上传需要 AI 改比例的图片");
@@ -896,11 +1621,18 @@ export default function DetailPageGenerator() {
         toast.error("请选择至少一个比例");
         return;
       }
-      const nextItems = buildResizeItems(resizeImages, selectedResizeRatios);
+      const groupId = `resize-${createId()}`;
+      const nextItems = buildResizeItems(resizeImages, selectedResizeRatios).map((item, index) => ({
+        ...item,
+        groupId,
+        groupTitle: `${productName.trim() || "图片"} 尺寸转换`,
+        groupIndex: index,
+      }));
       setItems(nextItems);
       setIsGenerating(true);
       try {
-        await Promise.all(nextItems.map((item) => runItemTask(item)));
+        const results = await runWithConcurrency(nextItems, 2, (item) => runItemTask(item));
+        appendHistory(results);
         toast.success("AI 尺寸生成流程已结束");
       } finally {
         setIsGenerating(false);
@@ -913,12 +1645,20 @@ export default function DetailPageGenerator() {
       toast.error("请先输入商品名");
       return;
     }
-    if (productImages.length === 0) {
+    if (mode !== "sku" && productImages.length === 0) {
       toast.error("请至少上传一张商品图");
       return;
     }
-    if ((mode === "main" || mode === "replace") && referenceImages.length === 0) {
-      toast.error(mode === "replace" ? "请上传需要替换主体的参考图" : "请上传爆款主图参考图");
+    if ((mode === "main" || mode === "replace" || mode === "competitor") && referenceImages.length === 0) {
+      toast.error(mode === "replace" ? "请上传需要替换主体的参考图" : "请上传参考图");
+      return;
+    }
+    if (mode === "sku" && skuTaskSpecs.length === 0) {
+      toast.error("请先填写至少 1 个 SKU，最多一次生成 6 个颜色/规格");
+      return;
+    }
+    if (mode === "sku" && skuSlots.some((slot) => (slot.name.trim() || slot.spec.trim()) && slot.productImages.length === 0)) {
+      toast.error("每个已填写的 SKU 都需要上传对应规格商品图");
       return;
     }
 
@@ -936,11 +1676,11 @@ export default function DetailPageGenerator() {
       usageScene,
       sameStyle,
     };
-    const nextItems =
+    const baseItems =
       mode === "detail"
         ? buildDetailItems(form, "3:4")
         : mode === "main"
-          ? buildMainItems(form, "1:1")
+          ? buildMainItems(form, "1:1").slice(0, 2)
           : mode === "buyer"
             ? buildBuyerItems(form, {
                 style: buyerStyle,
@@ -955,11 +1695,43 @@ export default function DetailPageGenerator() {
               })
             : mode === "replace"
               ? buildReplaceItems(form, productImages, referenceImages, replaceRatio, replaceKeepProductSubject)
+              : mode === "sku"
+                ? buildMainItems(form, "1:1").slice(0, 1)
+                : mode === "ab"
+                  ? buildMainItems(form, "1:1").slice(0, 1)
+                  : mode === "competitor"
+                    ? buildMainItems(form, "1:1").slice(0, 2)
               : buildWhiteItems(form, "1:1");
-    setItems(nextItems);
+    const nextItems = expandProductionItems(baseItems, {
+      mode,
+      skuText,
+      skuSpecs: skuTaskSpecs,
+      skuReferenceStrength,
+      abCount,
+      competitorStrength,
+    });
+    const groupId = `${mode}-${createId()}`;
+    const groupTitle =
+      mode === "sku"
+        ? `${normalizedProductName} 批量 SKU`
+        : mode === "detail"
+          ? `${normalizedProductName} 详情页`
+          : mode === "ab"
+            ? `${normalizedProductName} A/B 测试图`
+            : mode === "competitor"
+              ? `${normalizedProductName} 竞品图复刻`
+              : `${normalizedProductName} 电商出图`;
+    const groupedItems = nextItems.map((item, index) => ({
+      ...item,
+      groupId,
+      groupTitle,
+      groupIndex: index,
+    }));
+    setItems(groupedItems);
     setIsGenerating(true);
     try {
-      await Promise.all(nextItems.map((item) => runItemTask(item)));
+      const results = await runWithConcurrency(groupedItems, mode === "sku" ? 2 : 3, (item) => runItemTask(item));
+      appendHistory(results);
       toast.success(
         mode === "detail"
           ? "6 张分页详情页生成流程已结束"
@@ -967,8 +1739,14 @@ export default function DetailPageGenerator() {
             ? "爆款主图复刻生成流程已结束"
             : mode === "buyer"
               ? "买家秀生成流程已结束"
-              : mode === "replace"
-                ? "批量替换主体生成流程已结束"
+            : mode === "replace"
+              ? "批量替换主体生成流程已结束"
+              : mode === "sku"
+                ? "批量 SKU 出图流程已结束"
+                : mode === "ab"
+                  ? "A/B 测试图生成流程已结束"
+                  : mode === "competitor"
+                    ? "竞品图复刻增强流程已结束"
                 : "白底图生成流程已结束",
       );
     } finally {
@@ -977,9 +1755,137 @@ export default function DetailPageGenerator() {
   };
 
   const handleModeChange = (nextMode: WorkMode) => {
+    if (session?.role !== "admin" && commercePermissions !== null && !commercePermissions.includes(nextMode)) {
+      toast.error("当前账号没有这个电商功能权限，请联系管理员开启");
+      return;
+    }
     setMode(nextMode);
     setItems([]);
     setRegeneratingItemIds([]);
+    setPsdLayers([]);
+    setPsdCanvasSize(null);
+    if (nextMode === "psd") {
+      setResizeImages((prev) => prev.slice(0, 1));
+    }
+  };
+
+  const handleSaveProject = () => {
+    const name = projectName.trim() || productName.trim() || "未命名套图";
+    const project: CommerceProject = {
+      id: createId(),
+      name,
+      updatedAt: Date.now(),
+      mode,
+      productName,
+      category,
+      sellingPoints,
+      platform,
+      region,
+      language,
+      style,
+      audience,
+      priceBand,
+      extra,
+      usageScene,
+      skuText,
+      skuSharedReferenceImages: storedImages(skuSharedReferenceImages),
+      skuSlots: skuSlots.map((slot) => ({
+        id: slot.id,
+        name: slot.name,
+        spec: slot.spec,
+        productImages: storedImages(slot.productImages),
+      })),
+      productImages: storedImages(productImages),
+      referenceImages: storedImages(referenceImages),
+      backgroundImages: storedImages(backgroundImages),
+      resizeImages: storedImages(resizeImages),
+    };
+    setProjects((prev) => {
+      const next = [project, ...prev.filter((item) => item.name !== name)].slice(0, 24);
+      writeStoredList(PROJECTS_KEY, next);
+      return next;
+    });
+    setProjectName(name);
+    toast.success("套图项目已保存");
+  };
+
+  const handleLoadProject = async (id: string) => {
+    const project = projects.find((item) => item.id === id);
+    if (!project) return;
+    setMode(project.mode);
+    setProjectName(project.name);
+    setProductName(project.productName);
+    setCategory(project.category);
+    setSellingPoints(project.sellingPoints);
+    setPlatform(project.platform);
+    setRegion(project.region);
+    setLanguage(project.language);
+    setStyle(project.style);
+    setAudience(project.audience);
+    setPriceBand(project.priceBand);
+    setExtra(project.extra);
+    setUsageScene(project.usageScene);
+    setSkuText(project.skuText || "");
+    const legacyReferenceImages = (project.skuSlots || [])
+      .flatMap((slot) => Array.isArray((slot as StoredSkuSlot & { referenceImages?: StoredUploadImage[] }).referenceImages)
+        ? ((slot as StoredSkuSlot & { referenceImages?: StoredUploadImage[] }).referenceImages || [])
+        : []);
+    setSkuSharedReferenceImages(await storedToUploadImages([
+      ...(project.skuSharedReferenceImages || []),
+      ...legacyReferenceImages,
+    ].slice(0, 6)));
+    const loadedSkuSlots = await Promise.all(
+      (project.skuSlots || []).slice(0, 6).map(async (slot, index) => ({
+        id: slot.id || createId(),
+        name: slot.name || "",
+        spec: slot.spec || "",
+        productImages: await storedToUploadImages(slot.productImages || []),
+      })),
+    );
+    setSkuSlots(loadedSkuSlots.length ? loadedSkuSlots.slice(0, 6) : [createSkuSlot(0)]);
+    setProductImages(await storedToUploadImages(project.productImages || []));
+    setReferenceImages(await storedToUploadImages(project.referenceImages || []));
+    setBackgroundImages(await storedToUploadImages(project.backgroundImages || []));
+    setResizeImages(await storedToUploadImages(project.resizeImages || []));
+    setItems([]);
+    setPsdLayers([]);
+    setPsdCanvasSize(null);
+    toast.success("套图项目已载入");
+  };
+
+  const handleExtractSellingPoints = async () => {
+    if (session?.role !== "admin" && commercePermissions !== null && !commercePermissions.includes("points")) {
+      toast.error("当前账号没有商品卖点提炼权限，请联系管理员开启");
+      return;
+    }
+    const source = [productName, category, sellingPoints, extra].filter(Boolean).join("\n");
+    if (!source.trim() && productImages.length === 0) {
+      toast.error("请先输入商品信息或上传商品图");
+      return;
+    }
+    setIsExtractingPoints(true);
+    try {
+      const data = await createChatCompletion(
+        [
+          {
+            role: "user",
+            content: `请为电商出图提炼商品卖点，输出 5 条短卖点，每条 8-16 个中文字符，适合主图使用。商品信息：\n${source || "请根据商品图片常规卖点提炼"}`,
+          },
+        ],
+        "auto",
+        { commerceFeature: "points" },
+      );
+      const text = data.choices?.[0]?.message?.content?.trim();
+      if (!text) throw new Error("没有返回卖点");
+      setSellingPoints(text);
+      toast.success("商品卖点已提炼");
+    } catch (error) {
+      const fallback = parseLines(source).slice(0, 5).join("\n") || "高清质感\n多场景适用\n细节精致\n使用便捷\n送礼自用皆宜";
+      setSellingPoints(fallback);
+      toast.error(error instanceof Error ? `AI 提炼失败，已用本地规则生成：${error.message}` : "AI 提炼失败，已用本地规则生成");
+    } finally {
+      setIsExtractingPoints(false);
+    }
   };
 
   const toggleResizeRatio = (id: string) => {
@@ -1081,6 +1987,55 @@ export default function DetailPageGenerator() {
     }
   };
 
+  const handleDownloadUploadedPsd = async () => {
+    const source = resizeImages[0];
+    if (!source) {
+      toast.error("请先上传要拆分的图片");
+      return;
+    }
+    if (psdLayers.length > 0 && psdCanvasSize) {
+      const baseName = safeFileName(source.file.name.replace(/\.[^.]+$/, "") || "元素");
+      const blob = createPsdBlobFromLayers(psdLayers, psdCanvasSize.width, psdCanvasSize.height);
+      downloadBlob(blob, `${safeFileName(`${productName.trim() || baseName}-PSD分层源文件`)}.psd`);
+      toast.success(`PSD 格式分层源文件已导出，共 ${psdLayers.length} 个图层`);
+      return;
+    }
+    setIsGenerating(true);
+    try {
+      setPsdLayers([]);
+      setPsdCanvasSize(null);
+      const prompt = [
+        "为上传的电商成品图生成 PSD 拆层用透明遮罩。",
+        "只去除纯白或近白背景，保留商品、文字、装饰图形、图标、阴影、贴纸等所有可见元素。",
+        "不要重新设计，不要移动、缩放、裁切任何元素，不要增删文字，不要改变商品外观。",
+        "输出与原图构图一致的透明背景 PNG，元素边缘干净，用于按原始坐标拆成 Photoshop 图层。",
+      ].join("\n");
+      const submitted = await createImageEditTask(`psd-split-${createId()}`, source.file, prompt, "gpt-image-2", undefined, undefined, "psd");
+      const finished = await pollTask(submitted.id);
+      if (finished.status !== "success") {
+        throw new Error(finished.error || "AI 拆层预处理失败");
+      }
+      const src = imageSourceFromTask(finished);
+      if (!src) {
+        throw new Error("AI 未返回可处理图片");
+      }
+      const original = await imageSourceToCanvas(source.dataUrl);
+      const mask = await imageSourceToCanvas(src, original.width, original.height);
+      const transparent = applyMaskToOriginal(original.canvas, mask.canvas);
+      const baseName = safeFileName(source.file.name.replace(/\.[^.]+$/, "") || "元素");
+      const layers = splitCanvasIntoLayers(transparent, baseName, psdSplitStrength);
+      setPsdLayers(layers);
+      setPsdCanvasSize({ width: original.width, height: original.height });
+      const blob = createPsdBlobFromLayers(layers, original.width, original.height);
+      downloadBlob(blob, `${safeFileName(`${productName.trim() || baseName}-PSD分层源文件`)}.psd`);
+      toast.success(`PSD 格式分层源文件已导出，共 ${layers.length} 个图层`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "PSD 导出失败");
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
   const handleRegenerateItem = async (item: GeneratedItem) => {
     if (item.status === "queued" || item.status === "running" || regeneratingItemIds.includes(item.id)) {
       return;
@@ -1095,15 +2050,19 @@ export default function DetailPageGenerator() {
         toast.error("这张图的产品图或参考图不存在，请重新上传");
         return;
       }
-    } else if (productImages.length === 0) {
+    } else if (mode !== "sku" && productImages.length === 0) {
       toast.error("请先保留至少一张商品图");
+      return;
+    } else if (mode === "sku" && (!item.extraFiles || item.extraFiles.length === 0)) {
+      toast.error("这张 SKU 图缺少对应规格商品图，请重新生成整批");
       return;
     }
 
     setRegeneratingItemIds((prev) => [...prev, item.id]);
     try {
-      const ok = await runItemTask(item);
-      if (ok) {
+      const nextItem = await runItemTask(item);
+      if (nextItem.status === "success") {
+        appendHistory([nextItem]);
         toast.success(`${item.title} 已重新生成`);
       } else {
         toast.error(`${item.title} 重新生成失败`);
@@ -1132,6 +2091,16 @@ export default function DetailPageGenerator() {
           ? "白底图"
           : mode === "replace"
             ? "批量替换主体"
+            : mode === "psd"
+              ? "图片转 PSD"
+              : mode === "sku"
+                ? "批量 SKU 出图"
+                : mode === "ab"
+                  ? "A/B 测试图"
+                  : mode === "competitor"
+                    ? "竞品图复刻增强"
+                    : mode === "points"
+                      ? "商品卖点提炼"
             : "尺寸转换";
   const pageSubTitle =
     mode === "detail"
@@ -1144,6 +2113,16 @@ export default function DetailPageGenerator() {
           ? "上传商品图，一键生成精修白底图和 3D 白底图"
           : mode === "replace"
             ? "上传多张自己的产品和参考图，批量把参考图主体替换成你的产品"
+            : mode === "psd"
+              ? "上传成品图，AI 去白底并拆分元素，生成 PSD 格式分层源文件"
+              : mode === "sku"
+                ? "输入多个颜色、规格或型号，一键批量生成对应商品图"
+                : mode === "ab"
+                  ? "围绕同一商品生成多版主图，用于点击率测试"
+                  : mode === "competitor"
+                    ? "上传竞品参考图，增强复刻构图、光影和转化氛围"
+                    : mode === "points"
+                      ? "根据商品信息自动提炼适合主图和详情页使用的短卖点"
             : "上传图片，选择平台规格，一键导出多尺寸素材";
   const referenceTitle =
     mode === "detail"
@@ -1156,6 +2135,8 @@ export default function DetailPageGenerator() {
           ? "白底参考图（可选）"
           : mode === "replace"
             ? "参考图，上传需要替换主体的图片"
+            : mode === "competitor"
+              ? "竞品参考图，上传需要复刻增强的图片"
             : "尺寸转换";
   const resultTitle =
     mode === "detail"
@@ -1168,6 +2149,16 @@ export default function DetailPageGenerator() {
           ? "白底图生成结果"
           : mode === "replace"
             ? "批量替换主体结果"
+            : mode === "psd"
+              ? "PSD 源文件图层预览"
+              : mode === "sku"
+                ? "批量 SKU 出图结果"
+                : mode === "ab"
+                  ? "A/B 测试图结果"
+                  : mode === "competitor"
+                    ? "竞品图复刻增强结果"
+                    : mode === "points"
+                      ? "商品卖点提炼结果"
             : "AI 尺寸生成结果";
   const emptyText =
     mode === "detail"
@@ -1180,6 +2171,16 @@ export default function DetailPageGenerator() {
           ? "上传商品图并输入商品信息后，点击生成精修白底图和 3D 白底图。"
           : mode === "replace"
             ? "上传自己的产品图和参考图后，批量把参考图里的主体替换成自己的产品。"
+            : mode === "psd"
+              ? "上传一张成品图后，AI 会去除白底并识别画面元素，生成可在 Photoshop 编辑的 PSD 分层源文件。"
+              : mode === "sku"
+                ? "填写批量 SKU 并上传商品图后，一键生成每个 SKU 对应图片。"
+                : mode === "ab"
+                  ? "设置 A/B 版本数量并上传商品图后，一键生成多版测试图。"
+                  : mode === "competitor"
+                    ? "上传商品图和竞品参考图后，生成规避品牌元素的复刻增强图。"
+                    : mode === "points"
+                      ? "输入商品信息后点击提炼卖点，结果会写入商品卖点输入框。"
             : "上传图片并选择比例后，点击 AI 生成尺寸图。";
   const productUploadTitle = mode === "replace" ? "自己的产品图，支持多张批量替换" : "商品图，多角度上传";
 
@@ -1216,10 +2217,21 @@ export default function DetailPageGenerator() {
         className="hidden"
         onChange={(event) => void addImages("resize", Array.from(event.target.files || []))}
       />
+      <input
+        ref={skuUploadInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden"
+        onChange={(event) => {
+          void addSkuImages(Array.from(event.target.files || []));
+          event.currentTarget.value = "";
+        }}
+      />
 
       <section className="mx-auto grid w-full max-w-[1520px] gap-6 px-4 py-6 lg:grid-cols-[minmax(520px,0.92fr)_minmax(560px,1.08fr)] lg:px-8">
         <div className="space-y-4">
-          {mode === "resize" ? null : (
+          {["resize", "psd", "sku", "ab", "points"].includes(mode) ? null : (
             <div className="rounded-[28px] border border-border bg-card p-4 shadow-sm">
               <UploadStrip
                 title={referenceTitle}
@@ -1241,21 +2253,14 @@ export default function DetailPageGenerator() {
           )}
 
           <div className="rounded-[30px] border border-border bg-card p-4 shadow-sm">
-            <div className="mb-4 inline-flex rounded-full bg-secondary p-1">
-              {[
-                ["detail", "详情页分页"],
-                ["main", "爆款主图"],
-                ["buyer", "买家秀"],
-                ["white", "白底图"],
-                ["replace", "批量替换主体"],
-                ["resize", "尺寸转换"],
-              ].map(([value, label]) => (
+            <div className="mb-4 flex max-w-full flex-wrap gap-1 rounded-[24px] bg-secondary p-1">
+              {visibleModes.map(({ value, label }) => (
                 <button
                   key={value}
                   type="button"
-                  onClick={() => handleModeChange(value as WorkMode)}
+                  onClick={() => handleModeChange(value)}
                   className={cn(
-                    "h-9 rounded-full px-4 text-sm font-semibold transition",
+                    "h-9 whitespace-nowrap rounded-full px-4 text-sm font-semibold transition",
                     mode === value ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground",
                   )}
                 >
@@ -1263,17 +2268,186 @@ export default function DetailPageGenerator() {
                 </button>
               ))}
             </div>
+            {commercePermissions?.length === 0 && session.role !== "admin" ? (
+              <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                当前账号还没有电商区功能权限，请联系管理员在后台开启。
+              </div>
+            ) : null}
 
-            {mode === "resize" ? (
+            <div className="mb-4 space-y-3">
+              {mode === "sku" ? (
+                <FeaturePanel title="批量 SKU 出图" description="默认 1 个 SKU，按需求新增到最多 6 个。这里只填写颜色/规格名；统一参考图支持设置参考程度，避免照搬造成版权风险。">
+                  <div className="space-y-4">
+                    <div className="rounded-2xl border border-border bg-card p-3">
+                      <div className="mb-3 flex items-center justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-semibold">统一 SKU 参考图</div>
+                          <div className="text-xs leading-5 text-muted-foreground">应用到本批所有 SKU，只参考颜色、材质和产品差异点。</div>
+                        </div>
+                        <span className="shrink-0 rounded-full bg-secondary px-2.5 py-1 text-xs text-muted-foreground">
+                          SKU {skuSlots.length}/6
+                        </span>
+                      </div>
+                      <UploadStrip
+                        title="统一 SKU 参考图/颜色图"
+                        images={skuSharedReferenceImages}
+                        onPick={() => skuUploadInputRef.current?.click()}
+                        onRemove={(id) => setSkuSharedReferenceImages((prev) => prev.filter((image) => image.id !== id))}
+                      />
+                      <div className="mt-3">
+                        <div className="mb-2 text-xs font-semibold text-muted-foreground">参考程度</div>
+                        <div className="grid gap-2 sm:grid-cols-3">
+                          {skuReferenceStrengthOptions.map((option) => (
+                            <button
+                              key={option.value}
+                              type="button"
+                              onClick={() => setSkuReferenceStrength(option.value)}
+                              className={cn(
+                                "h-9 rounded-xl border px-3 text-sm font-semibold transition",
+                                skuReferenceStrength === option.value
+                                  ? "border-foreground bg-foreground text-background"
+                                  : "border-border bg-background text-muted-foreground hover:text-foreground",
+                              )}
+                            >
+                              {option.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <label className="mt-3 flex w-fit cursor-pointer items-center gap-2 rounded-full bg-secondary px-3 py-2 text-sm font-semibold text-foreground">
+                        <input
+                          type="checkbox"
+                          checked={skuKeepSubject}
+                          onChange={(event) => setSkuKeepSubject(event.target.checked)}
+                          className="size-4 accent-foreground"
+                        />
+                        保持产品主体不变
+                      </label>
+                    </div>
+
+                    <div className="grid gap-3">
+                      {skuSlots.map((slot, index) => (
+                        <div key={slot.id} className="rounded-2xl border border-border bg-background p-3">
+                          <div className="mb-3 flex items-center justify-between">
+                            <div className="text-sm font-semibold">SKU {index + 1}</div>
+                            {skuSlots.length > 1 ? (
+                              <button
+                                type="button"
+                                onClick={() => removeSkuSlot(slot.id)}
+                                className="rounded-full bg-secondary px-2.5 py-1 text-xs font-semibold text-muted-foreground transition hover:text-foreground"
+                              >
+                                删除
+                              </button>
+                            ) : null}
+                          </div>
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <input
+                              value={slot.name}
+                              onChange={(event) => updateSkuSlot(slot.id, { name: event.target.value })}
+                              placeholder="颜色/SKU 名称，例如：黑色、白色、蓝色"
+                              className="h-10 rounded-xl border border-input bg-card px-3 text-sm outline-none placeholder:text-muted-foreground focus:border-foreground"
+                            />
+                            <input
+                              value={slot.spec}
+                              onChange={(event) => updateSkuSlot(slot.id, { spec: event.target.value })}
+                              placeholder="规格，例如：64G、礼盒款、XL"
+                              className="h-10 rounded-xl border border-input bg-card px-3 text-sm outline-none placeholder:text-muted-foreground focus:border-foreground"
+                            />
+                          </div>
+                          <div className="mt-3">
+                            <input
+                              id={`sku-product-${slot.id}`}
+                              type="file"
+                              accept="image/*"
+                              multiple
+                              className="hidden"
+                              onChange={(event) => {
+                                void addSkuProductImages(slot.id, Array.from(event.target.files || []));
+                                event.currentTarget.value = "";
+                              }}
+                            />
+                            <UploadStrip
+                              title="对应规格商品图"
+                              images={slot.productImages}
+                              onPick={() => document.getElementById(`sku-product-${slot.id}`)?.click()}
+                              onRemove={(id) => removeSkuProductImage(slot.id, id)}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    {skuSlots.length < 6 ? (
+                      <button
+                        type="button"
+                        onClick={addSkuSlot}
+                        className="flex h-11 w-full items-center justify-center gap-2 rounded-2xl border border-dashed border-border bg-background text-sm font-semibold text-foreground transition hover:bg-secondary"
+                      >
+                        <Plus className="size-4" />
+                        新增 SKU
+                      </button>
+                    ) : null}
+                  </div>
+                </FeaturePanel>
+              ) : mode === "ab" ? (
+                <FeaturePanel title="A/B 测试图" description="为同一商品生成多个差异化构图版本，用于点击率测试。">
+                  <select
+                    value={abCount}
+                    onChange={(event) => setAbCount(Number(event.target.value))}
+                    className="h-10 w-full rounded-xl border border-input bg-card px-3 text-sm outline-none focus:border-foreground"
+                  >
+                    {[1, 2, 3, 4, 5].map((count) => (
+                      <option key={count} value={count}>A/B {count} 版</option>
+                    ))}
+                  </select>
+                </FeaturePanel>
+              ) : mode === "competitor" ? (
+                <FeaturePanel title="竞品图复刻增强" description="复刻参考图构图、光影、留白和转化氛围，但规避原品牌、水印和侵权元素。">
+                  <select
+                    value={competitorStrength}
+                    onChange={(event) => setCompetitorStrength(event.target.value as "standard" | "strong" | "strict")}
+                    className="h-10 w-full rounded-xl border border-input bg-card px-3 text-sm outline-none focus:border-foreground"
+                  >
+                    <option value="standard">标准复刻</option>
+                    <option value="strong">增强复刻</option>
+                    <option value="strict">严格复刻</option>
+                  </select>
+                </FeaturePanel>
+              ) : mode === "psd" ? (
+                <FeaturePanel title="图片转 PSD 深度优化" description="上传成品图后去除白底，按元素拆成独立图层，并保留每个元素在原图中的相对位置。">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {[
+                      ["soft", "弱：合并小元素"],
+                      ["normal", "中：常规拆分"],
+                      ["strong", "强：拆更多细节"],
+                    ].map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => setPsdSplitStrength(value as "soft" | "normal" | "strong")}
+                        className={cn(
+                          "h-8 rounded-full border px-3 text-xs font-semibold transition",
+                          psdSplitStrength === value ? "border-foreground bg-foreground text-background" : "border-border bg-card text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </FeaturePanel>
+              ) : null}
+            </div>
+
+            {mode === "resize" || mode === "psd" ? (
               <div className="space-y-4">
                 <UploadStrip
-                  title="上传图片，支持多张批量改尺寸"
+                  title={mode === "psd" ? "上传成品图，AI 拆分元素生成 PSD 分层源文件" : "上传图片，支持多张批量改尺寸"}
                   images={resizeImages}
                   onPick={() => resizeInputRef.current?.click()}
                   onRemove={(id) => removeImage("resize", id)}
                 />
 
-                <div className="rounded-2xl border border-border bg-background p-3">
+                {mode === "resize" ? (
+                  <div className="rounded-2xl border border-border bg-background p-3">
                   <div className="mb-3 text-sm font-semibold">选择比例</div>
                   <div className="space-y-2">
                     {resizePresets.map((preset) => {
@@ -1302,29 +2476,34 @@ export default function DetailPageGenerator() {
                       );
                     })}
                   </div>
-                </div>
+                  </div>
+                ) : null}
 
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="text-xs text-muted-foreground">AI 会智能扩图补背景，不会简单拉伸变形。</div>
+                  <div className="text-xs text-muted-foreground">
+                    {mode === "psd" ? "AI 会先去除白底，再把识别到的独立元素拆成 Photoshop 图层。" : "AI 会智能扩图补背景，不会简单拉伸变形。"}
+                  </div>
                   <Button
                     type="button"
                     onClick={() => void handleGenerate()}
-                    disabled={isGenerating}
+                    disabled={isGenerating || !currentModeAllowed}
                     className="rounded-full bg-foreground px-5 font-bold text-background hover:bg-foreground/90"
                   >
-                    {isGenerating ? <LoaderCircle className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
-                    AI 生成尺寸图
+                    {isGenerating ? <LoaderCircle className="size-4 animate-spin" /> : mode === "psd" ? <Layers className="size-4" /> : <Sparkles className="size-4" />}
+                    {mode === "psd" ? "AI 拆层生成 PSD" : "AI 生成尺寸图"}
                   </Button>
                 </div>
               </div>
             ) : (
               <>
-                <UploadStrip
-                  title={productUploadTitle}
-                  images={productImages}
-                  onPick={() => productInputRef.current?.click()}
-                  onRemove={(id) => removeImage("product", id)}
-                />
+                {mode === "sku" ? null : (
+                  <UploadStrip
+                    title={productUploadTitle}
+                    images={productImages}
+                    onPick={() => productInputRef.current?.click()}
+                    onRemove={(id) => removeImage("product", id)}
+                  />
+                )}
 
             <div className="mt-4 grid gap-3 sm:grid-cols-2">
               <input
@@ -1568,7 +2747,7 @@ export default function DetailPageGenerator() {
               <Button
                 type="button"
                 onClick={() => void handleGenerate()}
-                disabled={isGenerating}
+                disabled={isGenerating || !currentModeAllowed}
                 className="rounded-full bg-foreground px-5 font-bold text-background hover:bg-foreground/90"
               >
                 {isGenerating ? <LoaderCircle className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
@@ -1582,7 +2761,15 @@ export default function DetailPageGenerator() {
                         ? productImages.length > 0 && referenceImages.length > 0
                           ? `批量替换 ${productImages.length * referenceImages.length} 张`
                           : "批量替换主体"
-                        : "生成 2 张白底图"}
+                        : mode === "sku"
+                          ? "批量 SKU 出图"
+                          : mode === "ab"
+                            ? `生成 A/B ${abCount} 版`
+                            : mode === "competitor"
+                              ? "生成竞品复刻图"
+                              : mode === "points"
+                                ? "提炼商品卖点"
+                                : "生成 2 张白底图"}
               </Button>
             </div>
               </>
@@ -1601,17 +2788,83 @@ export default function DetailPageGenerator() {
             </div>
           </div>
 
+          {historyRecords.length ? (
+            <div className="rounded-[24px] border border-border bg-card p-3 shadow-sm">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <div className="text-sm font-semibold">出图历史 / 版本对比</div>
+                <button
+                  type="button"
+                  className="text-xs text-muted-foreground hover:text-foreground"
+                  onClick={() => {
+                    setHistoryRecords([]);
+                    setHistoryCompareIds([]);
+                    writeStoredList(HISTORY_KEY, []);
+                  }}
+                >
+                  清空历史
+                </button>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {[0, 1].map((slot) => (
+                  <select
+                    key={slot}
+                    value={historyCompareIds[slot] || ""}
+                    onChange={(event) => {
+                      const next = [...historyCompareIds];
+                      next[slot] = event.target.value;
+                      setHistoryCompareIds(next.filter(Boolean).slice(0, 2));
+                    }}
+                    className="h-9 rounded-xl border border-input bg-background px-3 text-sm outline-none focus:border-foreground"
+                  >
+                    <option value="">选择版本 {slot + 1}</option>
+                    {historyRecords.slice(0, 30).map((record) => (
+                      <option key={record.id} value={record.id}>
+                        {record.title} / {new Date(record.createdAt).toLocaleString("zh-CN")}
+                      </option>
+                    ))}
+                  </select>
+                ))}
+              </div>
+              {historyCompareIds.length ? (
+                <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                  {historyCompareIds.map((id) => {
+                    const record = historyRecords.find((item) => item.id === id);
+                    if (!record) return null;
+                    return (
+                      <div key={record.id} className="overflow-hidden rounded-xl border border-border bg-background">
+                        <div className="truncate px-2 py-1.5 text-xs font-semibold">{record.title}</div>
+                        <div className="aspect-square bg-muted">
+                          <img src={record.imageUrl} alt={record.title} className="h-full w-full object-contain" />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
           <div className="rounded-[28px] border border-border bg-card shadow-sm">
             <div className="flex items-center justify-between border-b border-border px-4 py-3">
               <div>
                 <div className="text-sm font-semibold">{resultTitle}</div>
                 <div className="mt-1 text-xs text-muted-foreground">
-                  完成 {completeCount}/{totalCount}
-                  {activeCount > 0 ? `，生成中 ${activeCount}` : ""}
+                  {mode === "psd" ? `源图 ${resizeImages.length ? "已上传" : "未上传"}${psdLayers.length ? `，已拆 ${psdLayers.length} 层` : ""}` : `完成 ${completeCount}/${totalCount}${activeCount > 0 ? `，生成中 ${activeCount}` : ""}`}
                 </div>
               </div>
               <div className="flex flex-wrap justify-end gap-2">
-                {mode === "detail" ? (
+                {mode === "psd" ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="rounded-full border-border bg-background text-foreground hover:bg-secondary"
+                    onClick={() => void handleDownloadUploadedPsd()}
+                    disabled={resizeImages.length === 0}
+                  >
+                    <Layers className="size-4" />
+                    {psdLayers.length ? "下载 PSD" : "AI 拆层"}
+                  </Button>
+                ) : mode === "detail" ? (
                   <Button
                     type="button"
                     variant="outline"
@@ -1623,38 +2876,79 @@ export default function DetailPageGenerator() {
                     拼成长图
                   </Button>
                 ) : null}
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="rounded-full border-border bg-background text-foreground hover:bg-secondary"
-                  onClick={() => void handleDownloadZipSmart()}
-                  disabled={!canDownloadZip}
-                >
-                  <Download className="size-4" />
-                  打包下载
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="rounded-full border-border bg-background text-foreground hover:bg-secondary"
-                  onClick={() => void handleGenerate()}
-                  disabled={
-                    isGenerating ||
-                    (mode === "resize"
-                      ? resizeImages.length === 0 || selectedResizeRatios.length === 0
-                      : productImages.length === 0 ||
-                        !productName.trim() ||
-                        ((mode === "main" || mode === "replace") && referenceImages.length === 0))
-                  }
-                >
-                  <RefreshCw className="size-4" />
-                  {mode === "resize" ? "重新生成" : "重新生成"}
-                </Button>
+                {mode !== "psd" ? (
+                  <>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="rounded-full border-border bg-background text-foreground hover:bg-secondary"
+                      onClick={() => void handleDownloadZipSmart()}
+                      disabled={!canDownloadZip}
+                    >
+                      <Download className="size-4" />
+                      打包下载
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="rounded-full border-border bg-background text-foreground hover:bg-secondary"
+                      onClick={() => void handleGenerate()}
+                      disabled={
+                        isGenerating ||
+                        (mode === "resize"
+                          ? resizeImages.length === 0 || selectedResizeRatios.length === 0
+                          : (mode !== "sku" && productImages.length === 0) ||
+                            !productName.trim() ||
+                            ((mode === "main" || mode === "replace") && referenceImages.length === 0))
+                      }
+                    >
+                      <RefreshCw className="size-4" />
+                      重新生成
+                    </Button>
+                  </>
+                ) : null}
               </div>
             </div>
 
             <div className="grid gap-3 p-3 sm:grid-cols-2">
-              {items.length === 0 ? (
+              {mode === "psd" && isGenerating ? (
+                <div className="col-span-full grid min-h-[520px] place-items-center text-center text-sm text-muted-foreground">
+                  <span className="inline-flex items-center gap-2">
+                    <LoaderCircle className="size-4 animate-spin" />
+                    AI 正在去白底并拆分图像元素...
+                  </span>
+                </div>
+              ) : mode === "psd" && psdLayers.length > 0 ? (
+                psdLayers.map((layer) => (
+                  <div key={layer.id} className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+                    <div className="flex items-center justify-between gap-2 px-3 py-2">
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-semibold">{layer.name}</div>
+                        <div className="truncate text-xs text-muted-foreground">
+                          x {layer.left} / y {layer.top} / {layer.width}x{layer.height}
+                        </div>
+                      </div>
+                      <span className="shrink-0 rounded-full bg-emerald-100 px-2 py-1 text-xs text-emerald-700">图层</span>
+                    </div>
+                    <div className="aspect-square bg-muted">
+                      <img src={layer.dataUrl} alt={layer.name} className="h-full w-full object-contain" />
+                    </div>
+                  </div>
+                ))
+              ) : mode === "psd" && resizeImages.length > 0 ? (
+                <div className="col-span-full overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+                  <div className="flex items-center justify-between gap-2 px-3 py-2">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-semibold">源图</div>
+                      <div className="truncate text-xs text-muted-foreground">{resizeImages[0].file.name}</div>
+                    </div>
+                    <span className="shrink-0 rounded-full bg-secondary px-2 py-1 text-xs text-muted-foreground">等待 AI 拆层</span>
+                  </div>
+                  <div className="aspect-video bg-muted">
+                    <img src={resizeImages[0].dataUrl} alt={resizeImages[0].file.name} className="h-full w-full object-contain" />
+                  </div>
+                </div>
+              ) : items.length === 0 ? (
                 <div className="col-span-full grid min-h-[520px] place-items-center text-center text-sm text-muted-foreground">
                   {emptyText}
                 </div>

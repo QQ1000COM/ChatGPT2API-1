@@ -43,6 +43,9 @@ export type ImageReplyContext = {
 
 export type ImageTurn = {
   id: string;
+  batchId?: string;
+  batchTitle?: string;
+  batchIndex?: number;
   prompt: string;
   model: ImageModel;
   mode: ImageConversationMode;
@@ -163,6 +166,9 @@ function normalizeTurn(turn: ImageTurn & Record<string, unknown>): ImageTurn {
 
   return {
     id: String(turn.id || `${Date.now()}`),
+    batchId: typeof turn.batchId === "string" && turn.batchId ? turn.batchId : undefined,
+    batchTitle: typeof turn.batchTitle === "string" && turn.batchTitle ? turn.batchTitle : undefined,
+    batchIndex: Number.isFinite(Number(turn.batchIndex)) ? Number(turn.batchIndex) : undefined,
     prompt: String(turn.prompt || ""),
     model: (turn.model as ImageModel) || "gpt-image-2",
     mode: turn.mode === "edit" ? "edit" : "generate",
@@ -256,6 +262,10 @@ async function readStoredImageConversations(): Promise<ImageConversation[]> {
       IMAGE_CONVERSATIONS_KEY,
     )) || [];
   return items.map(normalizeConversation);
+}
+
+export async function getCachedImageConversations(): Promise<ImageConversation[]> {
+  return sortImageConversations(await readStoredImageConversations());
 }
 
 export async function listImageConversations(): Promise<ImageConversation[]> {

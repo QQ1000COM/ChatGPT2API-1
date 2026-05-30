@@ -51,6 +51,17 @@ DEFAULT_REMOTE_STORAGE = {
     },
 }
 
+DEFAULT_CHAT_COMPLETION_CACHE = {
+    "enabled": True,
+    "ttl_seconds": 8,
+    "max_entries": 128,
+    "dedupe_inflight": True,
+    "stream_cache": True,
+    "normalize_messages": True,
+    "drop_assistant_history": False,
+    "drop_adjacent_duplicates": True,
+}
+
 
 def _normalize_bool(value: object, default: bool = False) -> bool:
     if isinstance(value, str):
@@ -160,6 +171,20 @@ def _normalize_remote_storage_settings(value: object) -> dict[str, object]:
             "access_key_id": str(s3.get("access_key_id") or "").strip(),
             "secret_access_key": str(s3.get("secret_access_key") or "").strip(),
         },
+    }
+
+
+def _normalize_chat_completion_cache_settings(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "enabled": _normalize_bool(source.get("enabled"), bool(DEFAULT_CHAT_COMPLETION_CACHE["enabled"])),
+        "ttl_seconds": _normalize_positive_int(source.get("ttl_seconds"), int(DEFAULT_CHAT_COMPLETION_CACHE["ttl_seconds"]), 0),
+        "max_entries": _normalize_positive_int(source.get("max_entries"), int(DEFAULT_CHAT_COMPLETION_CACHE["max_entries"]), 1),
+        "dedupe_inflight": _normalize_bool(source.get("dedupe_inflight"), bool(DEFAULT_CHAT_COMPLETION_CACHE["dedupe_inflight"])),
+        "stream_cache": _normalize_bool(source.get("stream_cache"), bool(DEFAULT_CHAT_COMPLETION_CACHE["stream_cache"])),
+        "normalize_messages": _normalize_bool(source.get("normalize_messages"), bool(DEFAULT_CHAT_COMPLETION_CACHE["normalize_messages"])),
+        "drop_assistant_history": _normalize_bool(source.get("drop_assistant_history"), bool(DEFAULT_CHAT_COMPLETION_CACHE["drop_assistant_history"])),
+        "drop_adjacent_duplicates": _normalize_bool(source.get("drop_adjacent_duplicates"), bool(DEFAULT_CHAT_COMPLETION_CACHE["drop_adjacent_duplicates"])),
     }
 
 
@@ -637,6 +662,7 @@ class ConfigStore:
         data["sensitive_words"] = self.sensitive_words
         data["ai_review"] = self.ai_review
         data["global_system_prompt"] = self.global_system_prompt
+        data["chat_completion_cache"] = self.get_chat_completion_cache_settings()
         data["site_name"] = self.site_name
         data["browser_title"] = self.browser_title
         data["qq_oauth"] = self.get_qq_oauth_settings(mask_secret=True)
@@ -661,6 +687,8 @@ class ConfigStore:
                 self.data.get("remote_storage"),
             )
             next_data["remote_storage"] = _normalize_remote_storage_settings(incoming_remote_storage)
+        if "chat_completion_cache" in next_data:
+            next_data["chat_completion_cache"] = _normalize_chat_completion_cache_settings(next_data.get("chat_completion_cache"))
         if "qq_oauth" in next_data:
             incoming_qq = dict(next_data.get("qq_oauth") if isinstance(next_data.get("qq_oauth"), dict) else {})
             current_qq = self.get_qq_oauth_settings()
@@ -683,6 +711,9 @@ class ConfigStore:
 
     def get_backup_settings(self) -> dict[str, object]:
         return _normalize_backup_settings(self.data.get("backup"))
+
+    def get_chat_completion_cache_settings(self) -> dict[str, object]:
+        return _normalize_chat_completion_cache_settings(self.data.get("chat_completion_cache"))
 
     def get_remote_storage_settings(self, *, mask_secret: bool = False) -> dict[str, object]:
         settings = _normalize_remote_storage_settings(self.data.get("remote_storage"))

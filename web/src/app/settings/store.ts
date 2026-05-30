@@ -92,6 +92,10 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     proxy: typeof config.proxy === "string" ? config.proxy : "",
     site_name: typeof config.site_name === "string" ? config.site_name : "ChatGPT2API",
     browser_title: typeof config.browser_title === "string" ? config.browser_title : String(config.site_name || "ChatGPT2API"),
+    announcement: {
+      enabled: Boolean(config.announcement?.enabled),
+      html: String(config.announcement?.html || ""),
+    },
     base_url: typeof config.base_url === "string" ? config.base_url : "",
     global_system_prompt: String(config.global_system_prompt || ""),
     sensitive_words: Array.isArray(config.sensitive_words) ? config.sensitive_words : [],
@@ -275,6 +279,7 @@ type SettingsStore = {
   setProxy: (value: string) => void;
   setSiteName: (value: string) => void;
   setBrowserTitle: (value: string) => void;
+  setAnnouncementField: (key: "enabled" | "html", value: string | boolean) => void;
   setBaseUrl: (value: string) => void;
   setQQOAuthField: (key: "app_id" | "app_key", value: string) => void;
   setQQNewUserFreeQuota: (value: string) => void;
@@ -453,6 +458,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         proxy: config.proxy.trim(),
         site_name: String(config.site_name || "ChatGPT2API").trim(),
         browser_title: String(config.browser_title || "").trim(),
+        announcement: {
+          enabled: Boolean(config.announcement?.enabled),
+          html: String(config.announcement?.html || "").trim(),
+        },
         base_url: String(config.base_url || "").trim(),
         global_system_prompt: String(config.global_system_prompt || "").trim(),
         sensitive_words: (config.sensitive_words || []).map((item) => String(item).trim()).filter(Boolean),
@@ -660,6 +669,19 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setBrowserTitle: (value) => {
     set((state) => state.config ? { config: { ...state.config, browser_title: value }, isDirty: true } : {});
+  },
+
+  setAnnouncementField: (key, value) => {
+    set((state) => state.config ? {
+      config: {
+        ...state.config,
+        announcement: {
+          ...(state.config.announcement || {}),
+          [key]: value,
+        },
+      },
+      isDirty: true,
+    } : {});
   },
 
   setQQOAuthField: (key, value) => {

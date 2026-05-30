@@ -16,7 +16,7 @@ from services.backup_service import BackupError, backup_service
 from services.config import config
 from services import gallery_service
 from services.image_owners_service import get_owner, owner_counts
-from services.image_service import count_total_images, delete_images, download_images_zip, get_image_download_response, get_thumbnail_response, list_images
+from services.image_service import count_total_images, dedupe_similar_images, delete_images, download_images_zip, get_image_download_response, get_thumbnail_response, list_images
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_service import log_service
 from services.proxy_service import test_proxy
@@ -35,6 +35,15 @@ def _admin_owner_ids() -> set[str]:
         if uid:
             ids.add(uid)
     return ids
+
+
+def _owner_names() -> dict[str, str]:
+    names = {"admin": "管理员"}
+    for item in auth_service.list_keys(role="user"):
+        uid = str(item.get("id") or "").strip()
+        if uid:
+            names[uid] = str(item.get("name") or uid)
+    return names
 
 
 def _request_origin(request: Request) -> str:
@@ -160,6 +169,10 @@ class ImageTagsRequest(BaseModel):
     path: str
     tags: list[str]
 
+class ImageDedupeRequest(BaseModel):
+    threshold: int = 4
+    dry_run: bool = True
+
 class LogDeleteRequest(BaseModel):
     ids: list[str] = []
 class BackupDeleteRequest(BaseModel):
@@ -194,9 +207,12 @@ def create_router(app_version: str) -> APIRouter:
 
     @router.get("/api/public-config")
     async def get_public_config():
+        announcement = config.data.get("announcement") if isinstance(config.data.get("announcement"), dict) else {}
         return {
             "site_name": config.site_name,
             "browser_title": config.browser_title,
+            "announcement_enabled": bool(announcement.get("enabled")),
+            "announcement_html": str(announcement.get("html") or ""),
             "qq_oauth_enabled": bool(str(config.get_qq_oauth_settings().get("app_id") or "").strip()),
             "new_user_free_quota": int(config.get_qq_oauth_settings().get("new_user_free_quota") or 0),
             "invite_reward_quota": int(config.get_qq_oauth_settings().get("invite_reward_quota") or 5),
@@ -232,7 +248,7 @@ def create_router(app_version: str) -> APIRouter:
             }
         admin_ids = _admin_owner_ids()
         owner_filter = "__admin__" if str(identity.get("role") or "") == "admin" or identity_id in admin_ids else identity_id
-        images = list_images(resolve_image_base_url(request), owner=owner_filter, admin_ids=admin_ids)
+        images = list_images(resolve_image_base_url(request), owner=owner_filter, admin_ids=admin_ids, owner_names=_owner_names())
         image_items = images.get("items", [])
         image_count = len(image_items)
         try:
@@ -366,6 +382,11 @@ def create_router(app_version: str) -> APIRouter:
         start_date: str = "",
         end_date: str = "",
         owner: str = "",
+        q: str = "",
+        tag: str = "",
+        size: str = "",
+        tool: str = "",
+        status: str = "",
         authorization: str | None = Header(default=None),
     ):
         require_admin(authorization)
@@ -375,6 +396,12 @@ def create_router(app_version: str) -> APIRouter:
             end_date=end_date.strip(),
             owner=owner.strip(),
             admin_ids=_admin_owner_ids(),
+            query=q.strip(),
+            tag=tag.strip(),
+            size=size.strip(),
+            tool=tool.strip(),
+            status=status.strip(),
+            owner_names=_owner_names(),
         )
 
     @router.get("/api/me/images")
@@ -407,6 +434,7 @@ def create_router(app_version: str) -> APIRouter:
             end_date=end_date.strip(),
             owner=owner_filter,
             admin_ids=admin_ids,
+            owner_names=_owner_names(),
         )
 
     @router.get("/api/images/owners")
@@ -490,6 +518,15 @@ def create_router(app_version: str) -> APIRouter:
         if not owned:
             return {"removed": 0}
         return delete_images(owned)
+
+    @router.post("/api/images/dedupe")
+    async def dedupe_images_endpoint(body: ImageDedupeRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return await run_in_threadpool(
+            dedupe_similar_images,
+            threshold=max(0, min(16, int(body.threshold or 4))),
+            dry_run=bool(body.dry_run),
+        )
 
     @router.post("/api/images/download")
     async def download_images_endpoint(body: ImageDownloadRequest, authorization: str | None = Header(default=None)):

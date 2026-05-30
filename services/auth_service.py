@@ -12,6 +12,43 @@ from services.config import config
 from services.storage.base import StorageBackend
 
 AuthRole = Literal["admin", "user"]
+COMMERCE_FEATURES = {
+    "detail",
+    "main",
+    "buyer",
+    "white",
+    "replace",
+    "resize",
+    "sku",
+    "ab",
+    "competitor",
+}
+API_ENDPOINTS = {
+    "chat",
+    "responses",
+    "images",
+    "models",
+    "messages",
+    "image_tasks",
+}
+CHAT_FEATURES = {
+    "chat",
+    "attachments",
+    "web",
+    "code",
+    "image_understanding",
+}
+USAGE_COUNTERS = {
+    "chat_calls",
+    "response_calls",
+    "message_calls",
+    "image_calls",
+    "model_calls",
+    "input_tokens",
+    "output_tokens",
+    "images",
+    "attachments",
+}
 
 
 def _now_iso() -> str:
@@ -28,6 +65,7 @@ class AuthService:
         self._lock = Lock()
         self._items = self._load()
         self._last_used_flush_at: dict[str, datetime] = {}
+        self._active_requests: dict[str, int] = {}
 
     @staticmethod
     def _clean(value: object) -> str:
@@ -44,6 +82,60 @@ class AuthService:
         except (TypeError, ValueError):
             return default
 
+    @staticmethod
+    def _normalize_commerce_permissions(value: object, role: str) -> list[str]:
+        if role == "admin":
+            return sorted(COMMERCE_FEATURES)
+        if not isinstance(value, list):
+            return []
+        result: list[str] = []
+        for item in value:
+            feature = str(item or "").strip()
+            if feature in COMMERCE_FEATURES and feature not in result:
+                result.append(feature)
+        return result
+
+    @staticmethod
+    def _normalize_string_list(value: object, *, allowed: set[str] | None = None, lower: bool = False) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        result: list[str] = []
+        for item in value:
+            text = str(item or "").strip()
+            if lower:
+                text = text.lower()
+            if not text:
+                continue
+            if allowed is not None and text not in allowed and text != "*":
+                continue
+            if text not in result:
+                result.append(text)
+        return result
+
+    @staticmethod
+    def _normalize_api_permissions(value: object, role: str) -> list[str]:
+        if role == "admin":
+            return sorted(API_ENDPOINTS)
+        normalized = AuthService._normalize_string_list(value, allowed=API_ENDPOINTS, lower=True)
+        return normalized or sorted(API_ENDPOINTS)
+
+    @staticmethod
+    def _normalize_chat_permissions(value: object, role: str, chat_enabled: bool) -> list[str]:
+        if role == "admin":
+            return sorted(CHAT_FEATURES)
+        normalized = AuthService._normalize_string_list(value, allowed=CHAT_FEATURES, lower=True)
+        if normalized:
+            return normalized
+        return ["chat"] if chat_enabled else []
+
+    @staticmethod
+    def _normalize_usage(value: object) -> dict[str, int]:
+        raw = value if isinstance(value, dict) else {}
+        usage: dict[str, int] = {}
+        for key in USAGE_COUNTERS:
+            usage[key] = AuthService._coerce_int(raw.get(key), 0)
+        return usage
+
     def _normalize_item(self, raw: object) -> dict[str, object] | None:
         if not isinstance(raw, dict):
             return None
@@ -57,12 +149,25 @@ class AuthService:
         name = self._clean(raw.get("name")) or self._default_name(role)
         created_at = self._clean(raw.get("created_at")) or _now_iso()
         last_used_at = self._clean(raw.get("last_used_at")) or None
+        chat_enabled = bool(raw.get("chat_enabled", False)) if role == "user" else True
+        commerce_permissions = self._normalize_commerce_permissions(raw.get("commerce_permissions"), role)
+        allowed_models = self._normalize_string_list(raw.get("allowed_models"))
+        api_permissions = self._normalize_api_permissions(raw.get("api_permissions"), role)
+        chat_permissions = self._normalize_chat_permissions(raw.get("chat_permissions"), role, chat_enabled)
         return {
             "id": item_id,
             "name": name,
             "role": role,
             "key_hash": key_hash,
             "enabled": bool(raw.get("enabled", True)),
+            "chat_enabled": chat_enabled,
+            "commerce_permissions": commerce_permissions,
+            "allowed_models": allowed_models,
+            "api_permissions": api_permissions,
+            "max_concurrency": self._coerce_int(raw.get("max_concurrency"), 0),
+            "webhook_url": self._clean(raw.get("webhook_url")),
+            "chat_permissions": chat_permissions,
+            "usage": self._normalize_usage(raw.get("usage")),
             "created_at": created_at,
             "last_used_at": last_used_at,
             # 一次性额度模型：quota=本次分配上限，used=累计已扣，
@@ -101,6 +206,18 @@ class AuthService:
             "name": item.get("name"),
             "role": item.get("role"),
             "enabled": bool(item.get("enabled", True)),
+            "chat_enabled": bool(item.get("chat_enabled", False)) if item.get("role") == "user" else True,
+            "commerce_permissions": AuthService._normalize_commerce_permissions(item.get("commerce_permissions"), str(item.get("role") or "user")),
+            "allowed_models": AuthService._normalize_string_list(item.get("allowed_models")),
+            "api_permissions": AuthService._normalize_api_permissions(item.get("api_permissions"), str(item.get("role") or "user")),
+            "max_concurrency": AuthService._coerce_int(item.get("max_concurrency"), 0),
+            "webhook_url": str(item.get("webhook_url") or ""),
+            "chat_permissions": AuthService._normalize_chat_permissions(
+                item.get("chat_permissions"),
+                str(item.get("role") or "user"),
+                bool(item.get("chat_enabled", False)) if item.get("role") == "user" else True,
+            ),
+            "usage": AuthService._normalize_usage(item.get("usage")),
             "created_at": item.get("created_at"),
             "last_used_at": item.get("last_used_at"),
             "quota": quota,
@@ -179,6 +296,13 @@ class AuthService:
         name: str = "",
         quota: int = 0,
         unlimited: bool = False,
+        chat_enabled: bool = False,
+        commerce_permissions: list[str] | None = None,
+        allowed_models: list[str] | None = None,
+        api_permissions: list[str] | None = None,
+        max_concurrency: int = 0,
+        webhook_url: str = "",
+        chat_permissions: list[str] | None = None,
     ) -> tuple[dict[str, object], str]:
         with self._lock:
             self._reload_locked()
@@ -196,6 +320,14 @@ class AuthService:
                 "role": role,
                 "key_hash": key_hash,
                 "enabled": True,
+                "chat_enabled": bool(chat_enabled) if role == "user" else True,
+                "commerce_permissions": self._normalize_commerce_permissions(commerce_permissions or [], role),
+                "allowed_models": self._normalize_string_list(allowed_models or []),
+                "api_permissions": self._normalize_api_permissions(api_permissions or [], role),
+                "max_concurrency": self._coerce_int(max_concurrency, 0),
+                "webhook_url": self._clean(webhook_url),
+                "chat_permissions": self._normalize_chat_permissions(chat_permissions or [], role, bool(chat_enabled) if role == "user" else True),
+                "usage": self._normalize_usage({}),
                 "created_at": _now_iso(),
                 "last_used_at": None,
                 # admin 默认无限；user 默认按传入 quota，0 即不可用，需要再分配。
@@ -234,6 +366,24 @@ class AuthService:
                     )
                 if "enabled" in updates and updates.get("enabled") is not None:
                     next_item["enabled"] = bool(updates.get("enabled"))
+                if "chat_enabled" in updates and updates.get("chat_enabled") is not None:
+                    next_item["chat_enabled"] = bool(updates.get("chat_enabled")) if next_role == "user" else True
+                if "commerce_permissions" in updates and updates.get("commerce_permissions") is not None:
+                    next_item["commerce_permissions"] = self._normalize_commerce_permissions(updates.get("commerce_permissions"), next_role)
+                if "allowed_models" in updates and updates.get("allowed_models") is not None:
+                    next_item["allowed_models"] = self._normalize_string_list(updates.get("allowed_models"))
+                if "api_permissions" in updates and updates.get("api_permissions") is not None:
+                    next_item["api_permissions"] = self._normalize_api_permissions(updates.get("api_permissions"), next_role)
+                if "max_concurrency" in updates and updates.get("max_concurrency") is not None:
+                    next_item["max_concurrency"] = self._coerce_int(updates.get("max_concurrency"), 0)
+                if "webhook_url" in updates and updates.get("webhook_url") is not None:
+                    next_item["webhook_url"] = self._clean(updates.get("webhook_url"))
+                if "chat_permissions" in updates and updates.get("chat_permissions") is not None:
+                    next_item["chat_permissions"] = self._normalize_chat_permissions(
+                        updates.get("chat_permissions"),
+                        next_role,
+                        bool(next_item.get("chat_enabled", False)) if next_role == "user" else True,
+                    )
                 if "key" in updates and updates.get("key") is not None:
                     next_item["key_hash"] = self._build_key_hash_locked(str(updates.get("key") or ""), exclude_id=normalized_id)
                 if next_role == "user":
@@ -249,6 +399,11 @@ class AuthService:
                     next_item["unlimited"] = True
                     next_item["quota"] = 0
                     next_item["used"] = 0
+                    next_item["chat_enabled"] = True
+                    next_item["commerce_permissions"] = sorted(COMMERCE_FEATURES)
+                    next_item["api_permissions"] = sorted(API_ENDPOINTS)
+                    next_item["chat_permissions"] = sorted(CHAT_FEATURES)
+                    next_item["max_concurrency"] = 0
                 self._items[index] = next_item
                 self._save()
                 return self._public_item(next_item)
@@ -311,6 +466,78 @@ class AuthService:
                 self._save()
                 return self._public_item(next_item)
         return None
+
+    def add_usage(
+        self,
+        key_id: str,
+        *,
+        endpoint: str = "",
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        images: int = 0,
+        attachments: int = 0,
+    ) -> dict[str, object] | None:
+        normalized_id = self._clean(key_id)
+        if not normalized_id or normalized_id == "admin":
+            return None
+        with self._lock:
+            for index, item in enumerate(self._items):
+                if item.get("id") != normalized_id:
+                    continue
+                next_item = dict(item)
+                usage = self._normalize_usage(next_item.get("usage"))
+                endpoint_key = {
+                    "chat": "chat_calls",
+                    "responses": "response_calls",
+                    "messages": "message_calls",
+                    "images": "image_calls",
+                    "models": "model_calls",
+                    "image_tasks": "image_calls",
+                }.get(str(endpoint or "").strip(), "")
+                if endpoint_key:
+                    usage[endpoint_key] = usage.get(endpoint_key, 0) + 1
+                usage["input_tokens"] = usage.get("input_tokens", 0) + max(0, int(input_tokens or 0))
+                usage["output_tokens"] = usage.get("output_tokens", 0) + max(0, int(output_tokens or 0))
+                usage["images"] = usage.get("images", 0) + max(0, int(images or 0))
+                usage["attachments"] = usage.get("attachments", 0) + max(0, int(attachments or 0))
+                next_item["usage"] = usage
+                self._items[index] = next_item
+                self._save()
+                return self._public_item(next_item)
+        return None
+
+    def enter_request(self, key_id: str) -> tuple[bool, str]:
+        normalized_id = self._clean(key_id)
+        if not normalized_id or normalized_id == "admin":
+            return True, ""
+        with self._lock:
+            record = None
+            for item in self._items:
+                if item.get("id") == normalized_id:
+                    record = item
+                    break
+            if record is None:
+                return False, "key not found"
+            limit = self._coerce_int(record.get("max_concurrency"), 0)
+            if limit <= 0:
+                self._active_requests[normalized_id] = self._active_requests.get(normalized_id, 0) + 1
+                return True, ""
+            current = self._active_requests.get(normalized_id, 0)
+            if current >= limit:
+                return False, "too many concurrent requests"
+            self._active_requests[normalized_id] = current + 1
+            return True, ""
+
+    def leave_request(self, key_id: str) -> None:
+        normalized_id = self._clean(key_id)
+        if not normalized_id or normalized_id == "admin":
+            return
+        with self._lock:
+            current = self._active_requests.get(normalized_id, 0)
+            if current <= 1:
+                self._active_requests.pop(normalized_id, None)
+            else:
+                self._active_requests[normalized_id] = current - 1
 
     def consume_quota(self, key_id: str, amount: int) -> dict[str, object]:
         """扣减用户密钥额度。返回 {ok, remaining, unlimited, reason}。

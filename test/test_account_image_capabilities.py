@@ -86,12 +86,14 @@ class AuthServiceTests(unittest.TestCase):
             self.assertEqual(item["role"], "user")
             self.assertEqual(item["name"], "Alice")
             self.assertTrue(item["enabled"])
+            self.assertFalse(item["chat_enabled"])
             self.assertTrue(raw_key.startswith("sk-"))
 
             authed = service.authenticate(raw_key)
             self.assertIsNotNone(authed)
             self.assertEqual(authed["id"], item["id"])
             self.assertEqual(authed["role"], "user")
+            self.assertFalse(authed["chat_enabled"])
             self.assertIsNotNone(authed["last_used_at"])
 
             updated = service.update_key(item["id"], {"enabled": False}, role="user")
@@ -148,6 +150,61 @@ class AuthServiceTests(unittest.TestCase):
             updated = service.update_key(first["id"], {"name": "Alice"}, role="user")
             self.assertIsNotNone(updated)
             self.assertEqual(updated["name"], "Alice")
+
+    def test_user_chat_permission_defaults_off_and_can_be_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AuthService(JSONStorageBackend(Path(tmp_dir) / "accounts.json", Path(tmp_dir) / "auth_keys.json"))
+            item, raw_key = service.create_key(role="user", name="Alice")
+
+            self.assertFalse(item["chat_enabled"])
+
+            updated = service.update_key(item["id"], {"chat_enabled": True}, role="user")
+            self.assertIsNotNone(updated)
+            self.assertTrue(updated["chat_enabled"])
+
+            authed = service.authenticate(raw_key)
+            self.assertIsNotNone(authed)
+            self.assertTrue(authed["chat_enabled"])
+
+    def test_user_key_api_model_chat_permissions_and_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AuthService(JSONStorageBackend(Path(tmp_dir) / "accounts.json", Path(tmp_dir) / "auth_keys.json"))
+            item, raw_key = service.create_key(
+                role="user",
+                name="Alice",
+                chat_enabled=True,
+                allowed_models=["gpt-5"],
+                api_permissions=["chat", "responses"],
+                max_concurrency=1,
+                webhook_url="https://example.test/hook",
+                chat_permissions=["chat", "code"],
+            )
+
+            self.assertEqual(item["allowed_models"], ["gpt-5"])
+            self.assertEqual(item["api_permissions"], ["chat", "responses"])
+            self.assertEqual(item["max_concurrency"], 1)
+            self.assertEqual(item["webhook_url"], "https://example.test/hook")
+            self.assertEqual(item["chat_permissions"], ["chat", "code"])
+
+            authed = service.authenticate(raw_key)
+            self.assertIsNotNone(authed)
+            ok, _ = service.enter_request(item["id"])
+            self.assertTrue(ok)
+            ok, reason = service.enter_request(item["id"])
+            self.assertFalse(ok)
+            self.assertIn("concurrent", reason)
+            service.leave_request(item["id"])
+            ok, _ = service.enter_request(item["id"])
+            self.assertTrue(ok)
+            service.leave_request(item["id"])
+
+            updated = service.add_usage(item["id"], endpoint="chat", input_tokens=10, output_tokens=5, images=2, attachments=1)
+            self.assertIsNotNone(updated)
+            self.assertEqual(updated["usage"]["chat_calls"], 1)
+            self.assertEqual(updated["usage"]["input_tokens"], 10)
+            self.assertEqual(updated["usage"]["output_tokens"], 5)
+            self.assertEqual(updated["usage"]["images"], 2)
+            self.assertEqual(updated["usage"]["attachments"], 1)
 
 
 if __name__ == "__main__":

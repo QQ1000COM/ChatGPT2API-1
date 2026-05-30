@@ -46,6 +46,88 @@ def require_admin(authorization: str | None) -> dict[str, object]:
     return identity
 
 
+def require_chat_permission(identity: dict[str, object]) -> None:
+    role = str(identity.get("role") or "").strip().lower()
+    item_id = str(identity.get("id") or "").strip()
+    if role == "admin" or not item_id or item_id == "admin":
+        return
+    record = auth_service.get_by_id(item_id)
+    if not record or not bool(record.get("chat_enabled", False)):
+        raise HTTPException(status_code=403, detail={"error": "当前账号没有 AI 对话权限，请联系管理员开启"})
+
+
+def require_chat_feature(identity: dict[str, object], feature: str) -> None:
+    require_chat_permission(identity)
+    role = str(identity.get("role") or "").strip().lower()
+    item_id = str(identity.get("id") or "").strip()
+    normalized = str(feature or "").strip().lower()
+    if role == "admin" or not item_id or item_id == "admin" or not normalized:
+        return
+    record = auth_service.get_by_id(item_id)
+    permissions = record.get("chat_permissions") if record else []
+    if not isinstance(permissions, list) or normalized not in permissions:
+        raise HTTPException(status_code=403, detail={"error": "current key is not allowed to use this chat capability"})
+
+
+def require_api_permission(identity: dict[str, object], endpoint: str, model: str | None = None) -> None:
+    role = str(identity.get("role") or "").strip().lower()
+    item_id = str(identity.get("id") or "").strip()
+    normalized_endpoint = str(endpoint or "").strip().lower()
+    if role == "admin" or not item_id or item_id == "admin":
+        return
+    record = auth_service.get_by_id(item_id)
+    if record is None:
+        raise HTTPException(status_code=403, detail={"error": "key not found"})
+    endpoint_permissions = record.get("api_permissions")
+    if isinstance(endpoint_permissions, list) and "*" not in endpoint_permissions and normalized_endpoint not in endpoint_permissions:
+        raise HTTPException(status_code=403, detail={"error": "current key is not allowed to call this API"})
+    allowed_models = record.get("allowed_models")
+    normalized_model = str(model or "").strip()
+    if normalized_model and isinstance(allowed_models, list) and allowed_models:
+        if "*" not in allowed_models and normalized_model not in allowed_models:
+            raise HTTPException(status_code=403, detail={"error": "current key is not allowed to use this model"})
+
+
+class ApiRequestGuard:
+    def __init__(self, identity: dict[str, object], endpoint: str, model: str | None = None):
+        self.identity = identity
+        self.endpoint = endpoint
+        self.model = model
+        self.key_id = str(identity.get("id") or "").strip()
+        self.entered = False
+
+    def __enter__(self) -> "ApiRequestGuard":
+        require_api_permission(self.identity, self.endpoint, self.model)
+        ok, reason = auth_service.enter_request(self.key_id)
+        if not ok:
+            raise HTTPException(status_code=429, detail={"error": reason or "too many concurrent requests"})
+        self.entered = True
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self.entered:
+            auth_service.leave_request(self.key_id)
+            self.entered = False
+
+
+def guard_api_request(identity: dict[str, object], endpoint: str, model: str | None = None) -> ApiRequestGuard:
+    return ApiRequestGuard(identity, endpoint, model)
+
+
+def require_commerce_permission(identity: dict[str, object], feature: str) -> None:
+    role = str(identity.get("role") or "").strip().lower()
+    item_id = str(identity.get("id") or "").strip()
+    normalized = str(feature or "").strip()
+    if not normalized:
+        return
+    if role == "admin" or not item_id or item_id == "admin":
+        return
+    record = auth_service.get_by_id(item_id)
+    permissions = record.get("commerce_permissions") if record else []
+    if not isinstance(permissions, list) or normalized not in permissions:
+        raise HTTPException(status_code=403, detail={"error": "当前账号没有这个电商功能权限，请联系管理员开启"})
+
+
 def resolve_image_base_url(request: Request) -> str:
     return config.base_url or f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
 

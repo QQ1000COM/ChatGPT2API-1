@@ -7,9 +7,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import api.image_tasks as image_tasks_module
+from services.config import config
 
 
-AUTH_HEADERS = {"Authorization": "Bearer chatgpt2api"}
+AUTH_HEADERS = {"Authorization": f"Bearer {config.auth_key}"}
 
 
 class FakeImageTaskService:
