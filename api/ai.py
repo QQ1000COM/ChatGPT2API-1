@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from api.support import consume_user_quota, guard_api_request, refund_user_quota, require_chat_feature, require_chat_permission, require_commerce_permission, require_identity, resolve_image_base_url
 from services.auth_service import auth_service
+from services.config import config
 from services.content_filter import check_request, request_text
 from services.image_owners_service import record_owner_for_result
 from services.image_prompts_service import record_prompt_for_result
@@ -119,11 +120,35 @@ def _response_text_tokens(result: object) -> int:
     return _rough_token_count(result.get("choices") or result.get("output") or result.get("content"))
 
 
+def _response_input_tokens(result: object) -> int:
+    if not isinstance(result, dict):
+        return 0
+    usage = result.get("usage")
+    if isinstance(usage, dict):
+        for key in ("input_tokens", "prompt_tokens"):
+            try:
+                value = int(usage.get(key) or 0)
+                if value > 0:
+                    return value
+            except (TypeError, ValueError):
+                pass
+    return 0
+
+
 def _record_usage(identity: dict[str, object], endpoint: str, *, input_tokens: int = 0, output_tokens: int = 0, images: int = 0, attachments: int = 0) -> None:
     key_id = str(identity.get("id") or "").strip()
-    if not key_id or key_id == "admin":
+    if not key_id:
         return
     try:
+        if key_id == "admin":
+            config.add_admin_usage(
+                endpoint=endpoint,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                images=images,
+                attachments=attachments,
+            )
+            return
         auth_service.add_usage(
             key_id,
             endpoint=endpoint,
@@ -330,18 +355,24 @@ def create_router() -> APIRouter:
                         yield event
                     if completed_response:
                         store_response(identity, completed_response, body_payload.get("input"))
+                        _record_usage(
+                            identity,
+                            "responses",
+                            input_tokens=_response_input_tokens(completed_response) or _rough_token_count(body_payload.get("input")),
+                            output_tokens=_response_text_tokens(completed_response),
+                        )
 
                 return stream_with_store()
 
             result = await call.run(handle_and_store, payload, sse="responses")
             if isinstance(result, dict):
                 store_response(identity, result, payload.get("input"))
-            _record_usage(
-                identity,
-                "responses",
-                input_tokens=_rough_token_count(payload.get("input")),
-                output_tokens=_response_text_tokens(result),
-            )
+                _record_usage(
+                    identity,
+                    "responses",
+                    input_tokens=_response_input_tokens(result) or _rough_token_count(payload.get("input")),
+                    output_tokens=_response_text_tokens(result),
+                )
             return result
 
     @router.get("/v1/responses/{response_id}")

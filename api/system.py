@@ -310,6 +310,10 @@ def create_router(app_version: str) -> APIRouter:
         if profile is None:
             admin_profile = config.get_admin_profile() if identity_id == "admin" else {}
             admin_usage = _aggregate_api_usage(auth_service.list_keys()) if identity_id == "admin" else _empty_api_usage()
+            if identity_id == "admin":
+                own_admin_usage = _normalize_api_usage(admin_profile.get("usage"))
+                for key, value in own_admin_usage.items():
+                    admin_usage[key] = admin_usage.get(key, 0) + value
             profile = {
                 "id": identity_id or "admin",
                 "name": identity.get("name") or "管理员",

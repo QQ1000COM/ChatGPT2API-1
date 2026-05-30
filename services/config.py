@@ -6,6 +6,7 @@ import os
 import secrets
 import sys
 from pathlib import Path
+from threading import Lock
 import time
 from datetime import datetime, timezone
 
@@ -62,6 +63,19 @@ DEFAULT_CHAT_COMPLETION_CACHE = {
     "drop_adjacent_duplicates": True,
 }
 
+ADMIN_USAGE_COUNTERS = (
+    "chat_calls",
+    "response_calls",
+    "message_calls",
+    "image_calls",
+    "model_calls",
+    "search_calls",
+    "input_tokens",
+    "output_tokens",
+    "images",
+    "attachments",
+)
+
 
 def _normalize_bool(value: object, default: bool = False) -> bool:
     if isinstance(value, str):
@@ -81,6 +95,14 @@ def _normalize_positive_int(value: object, default: int, minimum: int = 0) -> in
     except (TypeError, ValueError):
         normalized = default
     return max(minimum, normalized)
+
+
+def _normalize_admin_usage(value: object) -> dict[str, int]:
+    source = value if isinstance(value, dict) else {}
+    usage: dict[str, int] = {}
+    for key in ADMIN_USAGE_COUNTERS:
+        usage[key] = _normalize_positive_int(source.get(key), 0, 0)
+    return usage
 
 
 def _normalize_backup_include(value: object) -> dict[str, bool]:
@@ -329,6 +351,7 @@ def _load_settings() -> LoadedSettings:
 class ConfigStore:
     def __init__(self, path: Path):
         self.path = path
+        self._usage_lock = Lock()
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.data = self._load()
         self._storage_backend: StorageBackend | None = None
@@ -540,14 +563,52 @@ class ConfigStore:
         return {
             "qq": str(source.get("qq") or "").strip(),
             "qq_bound_at": str(source.get("qq_bound_at") or "").strip() or None,
+            "usage": _normalize_admin_usage(source.get("usage")),
         }
+
+    def add_admin_usage(
+        self,
+        *,
+        endpoint: str = "",
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        images: int = 0,
+        attachments: int = 0,
+    ) -> dict[str, object]:
+        with self._usage_lock:
+            source = self.data.get("admin_profile") if isinstance(self.data.get("admin_profile"), dict) else {}
+            usage = _normalize_admin_usage(source.get("usage"))
+            endpoint_key = {
+                "chat": "chat_calls",
+                "responses": "response_calls",
+                "messages": "message_calls",
+                "images": "image_calls",
+                "models": "model_calls",
+                "image_tasks": "image_calls",
+                "search": "search_calls",
+            }.get(str(endpoint or "").strip(), "")
+            if endpoint_key:
+                usage[endpoint_key] = usage.get(endpoint_key, 0) + 1
+            usage["input_tokens"] = usage.get("input_tokens", 0) + _normalize_positive_int(input_tokens, 0)
+            usage["output_tokens"] = usage.get("output_tokens", 0) + _normalize_positive_int(output_tokens, 0)
+            usage["images"] = usage.get("images", 0) + _normalize_positive_int(images, 0)
+            usage["attachments"] = usage.get("attachments", 0) + _normalize_positive_int(attachments, 0)
+            next_profile = dict(source)
+            next_profile["usage"] = usage
+            next_data = dict(self.data)
+            next_data["admin_profile"] = next_profile
+            self.data = next_data
+            self._save()
+            return self.get_admin_profile()
 
     def bind_admin_qq(self, qq: str) -> dict[str, object]:
         normalized_qq = str(qq or "").strip()
+        source = self.data.get("admin_profile") if isinstance(self.data.get("admin_profile"), dict) else {}
         next_data = dict(self.data)
         next_data["admin_profile"] = {
             "qq": normalized_qq,
             "qq_bound_at": datetime.now(timezone.utc).isoformat() if normalized_qq else None,
+            "usage": _normalize_admin_usage(source.get("usage")),
         }
         self.data = next_data
         self._save()
@@ -704,6 +765,14 @@ class ConfigStore:
             next_data["qq_oauth_states"] = self.data.get("qq_oauth_states") if isinstance(self.data.get("qq_oauth_states"), dict) else {}
         if "qq_login_sessions" in next_data:
             next_data["qq_login_sessions"] = self.data.get("qq_login_sessions") if isinstance(self.data.get("qq_login_sessions"), dict) else {}
+        if "admin_profile" in next_data:
+            incoming_admin = next_data.get("admin_profile") if isinstance(next_data.get("admin_profile"), dict) else {}
+            current_admin = self.get_admin_profile()
+            next_data["admin_profile"] = {
+                "qq": str(incoming_admin.get("qq") or current_admin.get("qq") or "").strip(),
+                "qq_bound_at": incoming_admin.get("qq_bound_at") or current_admin.get("qq_bound_at"),
+                "usage": _normalize_admin_usage(incoming_admin.get("usage") or current_admin.get("usage")),
+            }
         next_data.pop("backup_state", None)
         self.data = next_data
         self._save()
