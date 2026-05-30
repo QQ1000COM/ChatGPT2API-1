@@ -169,6 +169,113 @@ def test_responses_codex_tool_output_followup_can_answer(monkeypatch):
     assert response["output"][0]["content"][0]["text"] == "工作区是干净的。"
 
 
+def test_responses_codex_tool_output_progress_keeps_calling_tools(monkeypatch):
+    monkeypatch.setattr(
+        openai_v1_response,
+        "stream_text_deltas",
+        lambda backend, request: iter(["I found the repo status. Next step is to inspect the Responses tool handling."]),
+    )
+    monkeypatch.setattr(openai_v1_response, "text_backend", lambda: object())
+
+    response = openai_v1_response.handle({
+        "model": "gpt-5.1-codex",
+        "input": [{
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "git status --short\n",
+        }],
+        "_previous_input_items": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "修复Responses接入到codex执行任务中断的问题"}],
+        }],
+        "_previous_response": {
+            "output": [{
+                "type": "function_call",
+                "name": "shell_command",
+                "arguments": "{\"command\":\"git status --short\"}",
+            }],
+        },
+        "tools": [{
+            "type": "function",
+            "name": "shell_command",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        }],
+    })
+
+    assert isinstance(response, dict)
+    item = response["output"][0]
+    assert item["type"] == "function_call"
+    assert item["name"] == "shell_command"
+    assert "Responses|Codex|previous_response" in item["arguments"]
+
+
+def test_responses_codex_tool_output_confirmation_question_keeps_calling_tools(monkeypatch):
+    monkeypatch.setattr(
+        openai_v1_response,
+        "stream_text_deltas",
+        lambda backend, request: iter(["Next step: do you want me to merge upstream/main or cherry-pick specific commits?"]),
+    )
+    monkeypatch.setattr(openai_v1_response, "text_backend", lambda: object())
+
+    response = openai_v1_response.handle({
+        "model": "gpt-5.1-codex",
+        "input": [{
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "branch sync-upstream-v1.3.0 created",
+        }],
+        "_previous_input_items": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "查看上游1.3.0更新内容同步更新"}],
+        }],
+        "tools": [{"type": "function", "name": "shell_command"}],
+    })
+
+    assert isinstance(response, dict)
+    item = response["output"][0]
+    assert item["type"] == "function_call"
+    assert item["name"] == "shell_command"
+    assert "git remote -v" in item["arguments"]
+
+
+def test_responses_codex_tool_output_english_analysis_keeps_calling_tools(monkeypatch):
+    monkeypatch.setattr(
+        openai_v1_response,
+        "stream_text_deltas",
+        lambda backend, request: iter([
+            "From the files you surfaced, the settings model is larger than the UI exposes. "
+            "I would inspect config_generator.go next."
+        ]),
+    )
+    monkeypatch.setattr(openai_v1_response, "text_backend", lambda: object())
+
+    response = openai_v1_response.handle({
+        "model": "gpt-5.1-codex",
+        "input": [{
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "backend/modules/proxy/settings.go\nfrontend/src/api/singbox.ts\n",
+        }],
+        "_previous_input_items": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "修复Sing-box核心启动错误"}],
+        }],
+        "tools": [{"type": "function", "name": "shell_command"}],
+    })
+
+    assert isinstance(response, dict)
+    item = response["output"][0]
+    assert item["type"] == "function_call"
+    assert item["name"] == "shell_command"
+
+
 def test_responses_function_output_followup(monkeypatch):
     monkeypatch.setattr(
         openai_v1_response,
@@ -189,7 +296,7 @@ def test_responses_function_output_followup(monkeypatch):
 
     assert isinstance(response, dict)
     assert response["output"][0]["type"] == "message"
-    assert response["output"][0]["content"][0]["text"] == "Done."
+    assert response["output"][0]["content"][0]["text"] == "已完成。"
 
 
 def test_responses_text_stream_has_codex_event_sequence(monkeypatch):

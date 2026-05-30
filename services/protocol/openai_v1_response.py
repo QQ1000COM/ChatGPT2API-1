@@ -29,16 +29,18 @@ from utils.image_tokens import (
 )
 
 TOOL_CALL_SYSTEM_MESSAGE = """
-You are an OpenAI Responses API compatible coding model behind a proxy.
+你是一个通过代理实现 OpenAI Responses API 兼容的代码执行模型。
+你不能自己执行本地工具，只能请求客户端执行工具调用。
 You cannot execute local tools yourself; only request tool calls for the client to execute.
-You may request exactly one tool call when external work is required.
-If the user asks you to fix, implement, inspect, update, deploy, run tests, or otherwise handle work in the project,
-you MUST request an available tool call instead of writing manual instructions.
-When you need repository context, call a shell/command tool first.
-If you need a tool, reply with only one JSON object:
+当用户要求修复、实现、检查、升级、部署、运行测试、推送，或处理项目内任务时，必须优先请求可用工具调用，不要停在说明、确认或英文计划。
+工具返回结果后，如果任务还没有真正完成，必须继续请求下一个工具调用，不要把中间状态当成最终回答。
+需要仓库上下文时，先调用 shell/command 类工具。
+每次最多请求一个工具调用。
+如果需要工具，只回复一个 JSON 对象：
 {"type":"function_call","name":"tool_name","arguments":{...}}
-If no tool is needed, reply normally with the final answer.
-Never claim that you executed a tool yourself. Wait for function_call_output before using tool results.
+如果任务已经真正完成，再用简体中文给最终回答。
+中间过程和最终回答都必须使用简体中文。
+不要声称自己已经执行工具；必须等 function_call_output 返回后再基于结果继续。
 """.strip()
 
 CODEX_UPSTREAM_MAX_CHARS = 42000
@@ -56,6 +58,20 @@ CLARIFICATION_REQUEST_RE = re.compile(
     r"你想|是否要|要不要|需要你|请确认|选择|合并还是|还是.*挑选)",
     re.IGNORECASE,
 )
+INTERMEDIATE_PROGRESS_RE = re.compile(
+    r"(next step|you'?re now ready|i will|i'll|i need|i should|i can|let me|ready to|"
+    r"now i|we need|i found|i would|i recommend|from the files|key observations|suggests|most likely|"
+    r"下一步|接下来|我会|我先|我需要|我将|准备|还需要|继续执行|继续处理|需要继续|没有完成|中断|报错|错误|失败)",
+    re.IGNORECASE,
+)
+COMPLETION_TEXT_RE = re.compile(
+    r"(已完成|完成了|修复完成|处理完成|部署完成|测试通过|验证通过|全部完成|"
+    r"我已|已经|改好了|提交完成|推送完成|"
+    r"\bdone\b|\bcompleted\b|\bfinished\b|\bfixed\b|\bdeployed\b|\btests? passed\b)",
+    re.IGNORECASE,
+)
+CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+MAX_CODEX_AUTO_CONTINUE_TOOL_OUTPUTS = 10
 FENCED_COMMAND_RE = re.compile(
     r"```(?:powershell|pwsh|ps1|bash|sh|zsh|shell|cmd|bat|terminal)?\s*\n(.*?)```",
     re.DOTALL | re.IGNORECASE,
@@ -566,6 +582,52 @@ def _has_tool_output(messages: list[dict[str, Any]] | None) -> bool:
     )
 
 
+def _tool_output_count(messages: list[dict[str, Any]] | None) -> int:
+    if not messages:
+        return 0
+    return sum(
+        1
+        for message in messages
+        if isinstance(message, dict) and "Tool output for call_id" in str(message.get("content") or "")
+    )
+
+
+def _latest_message_is_tool_output(messages: list[dict[str, Any]] | None) -> bool:
+    if not messages:
+        return False
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        return "Tool output for call_id" in str(message.get("content") or "")
+    return False
+
+
+def _has_project_task(messages: list[dict[str, Any]] | None) -> bool:
+    if not messages:
+        return False
+    for text in _user_texts(messages):
+        if "Tool output for call_id" in text:
+            continue
+        if ACTION_REQUEST_RE.search(text):
+            return True
+    return False
+
+
+def _is_completion_text(text: str) -> bool:
+    return COMPLETION_TEXT_RE.search(str(text or "")) is not None
+
+
+def _normalize_codex_final_text(text: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return value
+    if CJK_RE.search(value):
+        return value
+    if _is_completion_text(value):
+        return "已完成。"
+    return value
+
+
 def _is_kickoff_text(text: str) -> bool:
     value = str(text or "").strip()
     if not value:
@@ -588,8 +650,15 @@ def _fallback_tool_call_from_text(text: str, tools: list[dict[str, Any]], messag
     latest_user = _latest_user_text(messages)
     user_text = "\n".join(_user_texts(messages))
     asks_for_confirmation = CLARIFICATION_REQUEST_RE.search(text) is not None
+    looks_like_progress = INTERMEDIATE_PROGRESS_RE.search(text) is not None
+    latest_is_tool_output = _latest_message_is_tool_output(messages)
+    project_task = _has_project_task(messages)
+    tool_outputs = _tool_output_count(messages)
+    task_can_continue = latest_is_tool_output and project_task and tool_outputs < MAX_CODEX_AUTO_CONTINUE_TOOL_OUTPUTS
+    is_completion = _is_completion_text(text)
+    english_intermediate = bool(task_can_continue and text.strip() and not CJK_RE.search(text) and not is_completion)
     should_start = bool(latest_user and ACTION_REQUEST_RE.search(latest_user))
-    should_recover_from_question = bool(asks_for_confirmation and ACTION_REQUEST_RE.search(user_text))
+    should_recover_from_question = bool(asks_for_confirmation and project_task)
     if should_start and (not _has_tool_output(messages) or latest_user.strip() in {"开始", "继续", "继续执行", "接着", "直接执行"}):
         return {
             "type": "function_call",
@@ -600,7 +669,13 @@ def _fallback_tool_call_from_text(text: str, tools: list[dict[str, Any]], messag
         return {
             "type": "function_call",
             "name": _tool_name(shell_tool),
-            "arguments": _tool_argument_for_command(shell_tool, _initial_codex_command(user_text)),
+            "arguments": _tool_argument_for_command(shell_tool, _next_codex_command(user_text, text)),
+        }
+    if task_can_continue and not is_completion and (looks_like_progress or english_intermediate):
+        return {
+            "type": "function_call",
+            "name": _tool_name(shell_tool),
+            "arguments": _tool_argument_for_command(shell_tool, _next_codex_command(user_text, text)),
         }
     return None
 
@@ -612,6 +687,15 @@ def _initial_codex_command(task_text: str) -> str:
     if any(keyword in text for keyword in ["push", "推送", "提交", "commit"]):
         return "git status --short; git branch --show-current; git log --oneline --decorate --max-count=5"
     return "git status --short; git branch --show-current; rg --files | Select-Object -First 80"
+
+
+def _next_codex_command(task_text: str, model_text: str = "") -> str:
+    text = f"{task_text}\n{model_text}".lower()
+    if "responses" in text or "codex" in text or "function_call" in text or "tool_call" in text:
+        return 'rg -n "function_call|function_call_output|tool_call|Responses|Codex|previous_response|store_response|response.completed" api services test'
+    if any(keyword in text for keyword in ["upstream", "release", "github", "上游", "同步", "升级", "版本"]):
+        return "git status --short; git branch --show-current; git remote -v; git log --oneline --decorate --max-count=12"
+    return "git status --short; rg --files | Select-Object -First 120"
 
 
 def _forced_initial_tool_call(tools: list[dict[str, Any]], messages: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -912,7 +996,7 @@ def stream_tool_response(backend, body: dict[str, Any], messages: list[dict[str,
         yield response_completed(response_id, model, created, [item], usage)
         return
 
-    text = str(parsed.get("content") or full_text)
+    text = _normalize_codex_final_text(str(parsed.get("content") or full_text))
     item = text_output_item(text)
     yield {"type": "response.output_item.added", "output_index": 0, "item": {**text_output_item("", item["id"], "in_progress"), "content": []}}
     yield {
