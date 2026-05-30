@@ -62,6 +62,91 @@ def test_responses_function_call_stream(monkeypatch):
     assert completed["response"]["output"][0]["type"] == "function_call"
 
 
+def test_responses_codex_command_block_becomes_shell_call(monkeypatch):
+    monkeypatch.setattr(
+        openai_v1_response,
+        "stream_text_deltas",
+        lambda backend, request: iter([
+            "请执行下面命令：\n```powershell\ngit status --short\n```\n然后继续。"
+        ]),
+    )
+    monkeypatch.setattr(openai_v1_response, "text_backend", lambda: object())
+
+    response = openai_v1_response.handle({
+        "model": "gpt-5.1-codex",
+        "input": "帮我处理这个项目",
+        "tools": [{
+            "type": "function",
+            "name": "shell_command",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        }],
+    })
+
+    assert isinstance(response, dict)
+    item = response["output"][0]
+    assert item["type"] == "function_call"
+    assert item["name"] == "shell_command"
+    assert '"command": "git status --short"' in item["arguments"]
+
+
+def test_responses_codex_action_request_gets_initial_shell_call(monkeypatch):
+    monkeypatch.setattr(
+        openai_v1_response,
+        "stream_text_deltas",
+        lambda backend, request: iter(["我先查看仓库状态，然后再修改代码。"]),
+    )
+    monkeypatch.setattr(openai_v1_response, "text_backend", lambda: object())
+
+    response = openai_v1_response.handle({
+        "model": "gpt-5.1-codex",
+        "input": "这次帮我完全修复",
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "exec_command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"cmd": {"type": "string"}},
+                    "required": ["cmd"],
+                },
+            },
+        }],
+    })
+
+    assert isinstance(response, dict)
+    item = response["output"][0]
+    assert item["type"] == "function_call"
+    assert item["name"] == "exec_command"
+    assert '"cmd": "git status --short"' in item["arguments"]
+
+
+def test_responses_codex_tool_output_followup_can_answer(monkeypatch):
+    monkeypatch.setattr(
+        openai_v1_response,
+        "stream_text_deltas",
+        lambda backend, request: iter(["工作区是干净的。"]),
+    )
+    monkeypatch.setattr(openai_v1_response, "text_backend", lambda: object())
+
+    response = openai_v1_response.handle({
+        "model": "gpt-5.1-codex",
+        "input": [{
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "git status --short returned empty output",
+        }],
+        "tools": [{"type": "function", "name": "shell_command"}],
+    })
+
+    assert isinstance(response, dict)
+    assert response["output"][0]["type"] == "message"
+    assert response["output"][0]["content"][0]["text"] == "工作区是干净的。"
+
+
 def test_responses_function_output_followup(monkeypatch):
     monkeypatch.setattr(
         openai_v1_response,

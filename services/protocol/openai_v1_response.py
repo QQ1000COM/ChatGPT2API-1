@@ -32,6 +32,9 @@ TOOL_CALL_SYSTEM_MESSAGE = """
 You are an OpenAI Responses API compatible coding model behind a proxy.
 You cannot execute local tools yourself; only request tool calls for the client to execute.
 You may request exactly one tool call when external work is required.
+If the user asks you to fix, implement, inspect, update, deploy, run tests, or otherwise handle work in the project,
+you MUST request an available tool call instead of writing manual instructions.
+When you need repository context, call a shell/command tool first.
 If you need a tool, reply with only one JSON object:
 {"type":"function_call","name":"tool_name","arguments":{...}}
 If no tool is needed, reply normally with the final answer.
@@ -41,6 +44,16 @@ Never claim that you executed a tool yourself. Wait for function_call_output bef
 CODEX_UPSTREAM_MAX_CHARS = 42000
 CODEX_UPSTREAM_MAX_MESSAGE_CHARS = 14000
 CODEX_UPSTREAM_KEEP_LAST_MESSAGES = 8
+SHELL_TOOL_NAME_HINTS = ("shell", "exec", "command", "terminal", "powershell", "bash", "run")
+ACTION_REQUEST_RE = re.compile(
+    r"(帮我|处理|修复|实现|新增|添加|升级|同步|部署|推送|测试|运行|查看|检查|改成|优化|继续|"
+    r"\bfix\b|\bimplement\b|\bupdate\b|\bdeploy\b|\bpush\b|\btest\b|\brun\b|\binspect\b|\bcheck\b)",
+    re.IGNORECASE,
+)
+FENCED_COMMAND_RE = re.compile(
+    r"```(?:powershell|pwsh|ps1|bash|sh|zsh|shell|cmd|bat|terminal)?\s*\n(.*?)```",
+    re.DOTALL | re.IGNORECASE,
+)
 
 
 def is_text_response_request(body: dict[str, Any]) -> bool:
@@ -413,6 +426,116 @@ def input_item_text(item: dict[str, Any]) -> str:
     return extract_response_prompt([item]) or _content_text(item.get("content"))
 
 
+def _tool_name(tool: dict[str, Any]) -> str:
+    function = tool.get("function") if isinstance(tool.get("function"), dict) else {}
+    return str(tool.get("name") or function.get("name") or "").strip()
+
+
+def _tool_parameters(tool: dict[str, Any]) -> dict[str, Any]:
+    function = tool.get("function") if isinstance(tool.get("function"), dict) else {}
+    parameters = tool.get("parameters") if isinstance(tool.get("parameters"), dict) else function.get("parameters")
+    return parameters if isinstance(parameters, dict) else {}
+
+
+def _find_shell_tool(tools: list[dict[str, Any]]) -> dict[str, Any] | None:
+    named_tools = [(tool, _tool_name(tool).lower()) for tool in tools if isinstance(tool, dict)]
+    for tool, name in named_tools:
+        if name in {"shell", "shell_command", "exec_command", "run_command", "terminal"}:
+            return tool
+    for tool, name in named_tools:
+        if any(hint in name for hint in SHELL_TOOL_NAME_HINTS):
+            return tool
+    return None
+
+
+def _extract_fenced_command(text: str) -> str:
+    for match in FENCED_COMMAND_RE.finditer(str(text or "")):
+        lines: list[str] = []
+        for raw_line in match.group(1).splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("$ "):
+                line = line[2:].strip()
+            if line.lower() in {"powershell", "bash", "sh", "cmd"}:
+                continue
+            lines.append(line)
+        command = "\n".join(lines).strip()
+        if command:
+            return command
+    return ""
+
+
+def _tool_argument_for_command(tool: dict[str, Any], command: str) -> dict[str, Any]:
+    parameters = _tool_parameters(tool)
+    properties = parameters.get("properties") if isinstance(parameters.get("properties"), dict) else {}
+    prop_names = {str(key) for key in properties.keys()}
+    if "command" in prop_names or not prop_names:
+        return {"command": command}
+    if "cmd" in prop_names:
+        return {"cmd": command}
+    if "script" in prop_names:
+        return {"script": command}
+    if "input" in prop_names:
+        return {"input": command}
+    if "args" in prop_names:
+        return {"args": [command]}
+    first = next(iter(prop_names), "command")
+    return {first: command}
+
+
+def _latest_user_text(messages: list[dict[str, Any]] | None) -> str:
+    if not messages:
+        return ""
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("role") or "").strip() != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict):
+                    parts.append(str(part.get("text") or ""))
+                elif isinstance(part, str):
+                    parts.append(part)
+            return "\n".join(part for part in parts if part).strip()
+        return str(content or "").strip()
+    return ""
+
+
+def _has_tool_output(messages: list[dict[str, Any]] | None) -> bool:
+    if not messages:
+        return False
+    return any(
+        isinstance(message, dict)
+        and "Tool output for call_id" in str(message.get("content") or "")
+        for message in messages
+    )
+
+
+def _fallback_tool_call_from_text(text: str, tools: list[dict[str, Any]], messages: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+    shell_tool = _find_shell_tool(tools)
+    if not shell_tool:
+        return None
+    command = _extract_fenced_command(text)
+    if command:
+        return {
+            "type": "function_call",
+            "name": _tool_name(shell_tool),
+            "arguments": _tool_argument_for_command(shell_tool, command),
+        }
+    latest_user = _latest_user_text(messages)
+    if latest_user and ACTION_REQUEST_RE.search(latest_user) and not _has_tool_output(messages):
+        return {
+            "type": "function_call",
+            "name": _tool_name(shell_tool),
+            "arguments": _tool_argument_for_command(shell_tool, "git status --short"),
+        }
+    return None
+
+
 def tool_messages_from_body(body: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
     model = str(body.get("model") or "auto").strip() or "auto"
     instructions = str(body.get("instructions") or "").strip()
@@ -494,10 +617,11 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
-def parse_tool_or_message(text: str, tools: list[dict[str, Any]]) -> dict[str, Any]:
+def parse_tool_or_message(text: str, tools: list[dict[str, Any]], messages: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     parsed = extract_json_object(text)
     if not parsed:
-        return {"type": "message", "content": text}
+        fallback = _fallback_tool_call_from_text(text, tools, messages)
+        return fallback or {"type": "message", "content": text}
     parsed_type = str(parsed.get("type") or parsed.get("kind") or "").strip()
     name = str(parsed.get("name") or parsed.get("tool") or parsed.get("function") or "").strip()
     tool_names = {
@@ -519,7 +643,8 @@ def parse_tool_or_message(text: str, tools: list[dict[str, Any]]) -> dict[str, A
         return {"type": "function_call", "name": name, "arguments": arguments}
     if parsed_type == "message" and isinstance(parsed.get("content"), str):
         return {"type": "message", "content": parsed["content"]}
-    return {"type": "message", "content": text}
+    fallback = _fallback_tool_call_from_text(text, tools, messages)
+    return fallback or {"type": "message", "content": text}
 
 
 def image_output_items(prompt: str, data: list[dict[str, Any]], item_id: str | None = None) -> list[dict[str, Any]]:
@@ -666,7 +791,7 @@ def stream_tool_response(backend, body: dict[str, Any], messages: list[dict[str,
     request = ConversationRequest(model=model, messages=messages)
     for delta in stream_text_deltas(backend, request):
         full_text += delta
-    parsed = parse_tool_or_message(full_text, tools)
+    parsed = parse_tool_or_message(full_text, tools, messages)
     if parsed["type"] == "function_call":
         item = function_call_item(str(parsed.get("name") or ""), parsed.get("arguments") or {})
         yield {"type": "response.output_item.added", "output_index": 0, "item": {**item, "status": "in_progress", "arguments": ""}}
