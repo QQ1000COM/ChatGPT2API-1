@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { BarChart3, Code2, Copy, DollarSign, Download, Folder, KeyRound, LoaderCircle, Maximize2, MessageCircle, RefreshCw } from "lucide-react";
+import { BarChart3, ChevronDown, Code2, Copy, DollarSign, Download, FileText, Folder, KeyRound, LoaderCircle, Maximize2, MessageCircle, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import { ImageLightbox } from "@/components/image-lightbox";
@@ -13,6 +13,40 @@ type ProfileImage = MyProfile["images"][number];
 type ProfileEntry =
   | { type: "image"; id: string; item: ProfileImage }
   | { type: "folder"; id: string; title: string; count: number; items: ProfileImage[] };
+
+function detailText(item: NonNullable<MyProfile["codex_logs"]>[number], key: string) {
+  const value = item.detail?.[key];
+  return typeof value === "string" || typeof value === "number" ? String(value) : "-";
+}
+
+function detailNumber(item: NonNullable<MyProfile["codex_logs"]>[number], key: string) {
+  const value = item.detail?.[key];
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function compactToken(value: number | null) {
+  if (value === null) return "-";
+  if (value >= 100_000) return `${(value / 1000).toFixed(1)}K`;
+  if (value >= 1000) return `${(value / 1000).toFixed(2)}K`;
+  return String(Math.round(value));
+}
+
+function compactUsd(value: number | null) {
+  if (value === null) return "-";
+  return `$${value.toFixed(5)}`;
+}
+
+function logStatus(item: NonNullable<MyProfile["codex_logs"]>[number]) {
+  const status = item.detail?.status;
+  if (status === "failed") return "失败";
+  if (status === "success") return "成功";
+  return "-";
+}
 
 function groupProfileImages(images: ProfileImage[]): ProfileEntry[] {
   const groups = new Map<string, ProfileImage[]>();
@@ -56,6 +90,7 @@ export default function ProfilePage() {
   const [lightboxImages, setLightboxImages] = useState<Array<{ id: string; src: string; sizeLabel?: string; dimensions?: string }>>([]);
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [codexLogsOpen, setCodexLogsOpen] = useState(false);
 
   const load = async () => {
     setIsLoading(true);
@@ -181,6 +216,7 @@ export default function ProfilePage() {
 
   const profile = data?.profile;
   const apiUsage = data?.api_usage?.usage;
+  const codexLogs = data?.codex_logs || [];
   const pricingModels = data?.api_pricing?.models || {};
   const apiBaseUrl =
     data?.api_base_url || (typeof window !== "undefined" ? `${window.location.origin}/v1` : "/v1");
@@ -282,6 +318,74 @@ export default function ProfilePage() {
             查看 OpenAI 官方价格
           </a>
         </div>
+      </section>
+
+      <section className="rounded-2xl border border-border bg-card shadow-sm">
+        <button
+          type="button"
+          className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
+          onClick={() => setCodexLogsOpen((value) => !value)}
+        >
+          <div>
+            <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+              <FileText className="size-4 text-muted-foreground" />
+              最近20条调用记录 - Codex
+            </div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              已收录 {codexLogs.length} 条，默认收起，展开后查看 token、费用和执行状态。
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="rounded-full border border-border bg-background px-3 py-1 text-xs text-muted-foreground">
+              {codexLogs.length} 条
+            </span>
+            <ChevronDown className={`size-4 text-muted-foreground transition-transform ${codexLogsOpen ? "rotate-180" : ""}`} />
+          </div>
+        </button>
+        {codexLogsOpen ? (
+          <div className="border-t border-border px-4 pb-4 pt-3">
+            {codexLogs.length > 0 ? (
+              <div className="overflow-x-auto">
+                <div className="min-w-[980px] overflow-hidden rounded-xl border border-border bg-background">
+                  <div className="grid grid-cols-[150px_110px_150px_repeat(6,minmax(86px,1fr))_80px] border-b border-border bg-muted/40 px-3 py-2 text-xs font-semibold text-muted-foreground">
+                    <div>时间</div>
+                    <div>用户</div>
+                    <div>模型</div>
+                    <div className="text-right">输入</div>
+                    <div className="text-right">输出</div>
+                    <div className="text-right">缓存</div>
+                    <div className="text-right">思考</div>
+                    <div className="text-right">总计</div>
+                    <div className="text-right">费用</div>
+                    <div className="text-right">状态</div>
+                  </div>
+                  {codexLogs.map((item) => (
+                    <div key={item.id} className="grid grid-cols-[150px_110px_150px_repeat(6,minmax(86px,1fr))_80px] items-center border-b border-border/70 px-3 py-2 text-xs last:border-b-0">
+                      <div className="whitespace-nowrap font-medium text-foreground">{item.time}</div>
+                      <div className="truncate text-muted-foreground">{detailText(item, "user_name")}</div>
+                      <div className="truncate font-medium text-foreground">{detailText(item, "model")}</div>
+                      <div className="text-right tabular-nums text-muted-foreground">{compactToken(detailNumber(item, "input_tokens"))}</div>
+                      <div className="text-right tabular-nums text-muted-foreground">{compactToken(detailNumber(item, "output_tokens"))}</div>
+                      <div className="text-right tabular-nums text-muted-foreground">{compactToken(detailNumber(item, "cached_input_tokens"))}</div>
+                      <div className="text-right tabular-nums text-muted-foreground">{compactToken(detailNumber(item, "reasoning_tokens"))}</div>
+                      <div className="text-right font-semibold tabular-nums text-foreground">{compactToken(detailNumber(item, "total_tokens"))}</div>
+                      <div className="text-right font-semibold tabular-nums text-foreground">{compactUsd(detailNumber(item, "estimated_cost_usd"))}</div>
+                      <div className="text-right">
+                        <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium ${item.detail?.status === "failed" ? "bg-red-50 text-red-600" : "bg-emerald-50 text-emerald-700"}`}>
+                          {logStatus(item)}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-xl border border-dashed border-border bg-background p-4 text-sm text-muted-foreground">
+                暂无 Codex 调用记录。
+              </div>
+            )}
+          </div>
+        ) : null}
       </section>
 
       <section className="rounded-2xl border border-border bg-card p-4 shadow-sm">

@@ -274,6 +274,7 @@ export type MyProfile = {
     updated_at: string;
     models: Record<string, { input: number; cached_input?: number; output: number }>;
   };
+  codex_logs?: SystemLog[];
 };
 
 export type ImageTask = {

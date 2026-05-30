@@ -126,6 +126,34 @@ def _api_usage_summary(profile: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _is_codex_call_log(item: dict[str, object]) -> bool:
+    detail = item.get("detail") if isinstance(item.get("detail"), dict) else {}
+    model = str(detail.get("model") or "").strip().lower()
+    endpoint = str(detail.get("endpoint") or "").strip()
+    summary = str(item.get("summary") or "").strip().lower()
+    return bool(detail.get("codex_mode")) or "codex" in model or ("codex" in summary and endpoint == "/v1/responses")
+
+
+def _profile_codex_logs(identity: dict[str, object]) -> list[dict[str, object]]:
+    identity_id = str(identity.get("id") or "").strip()
+    is_admin = str(identity.get("role") or "") == "admin" or identity_id == "admin"
+    rows: list[dict[str, object]] = []
+    for item in log_service.list(type="call", limit=200):
+        if not _is_codex_call_log(item):
+            continue
+        detail = item.get("detail") if isinstance(item.get("detail"), dict) else {}
+        if not is_admin:
+            key_id = str(detail.get("key_id") or "").strip()
+            user_name = str(detail.get("user_name") or detail.get("key_name") or "").strip()
+            identity_name = str(identity.get("name") or "").strip()
+            if key_id != identity_id and user_name != identity_name:
+                continue
+        rows.append(item)
+        if len(rows) >= 20:
+            break
+    return rows
+
+
 def _qq_callback_url(request: Request) -> str:
     return f"{_request_origin(request)}/api/oauth/qq/callback"
 
@@ -347,6 +375,7 @@ def create_router(app_version: str) -> APIRouter:
             "api_base_url": f"{_request_origin(request)}/v1",
             "api_usage": _api_usage_summary(profile),
             "api_pricing": OPENAI_API_PRICING,
+            "codex_logs": _profile_codex_logs(identity),
         }
 
     @router.post("/api/me/qq-bind-url")

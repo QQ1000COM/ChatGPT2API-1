@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, FileText, ImageIcon, LoaderCircle, RefreshCw, Search, Trash2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, ImageIcon, LoaderCircle, RefreshCw, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
@@ -49,33 +49,6 @@ function getStatus(item: SystemLog) {
   return "-";
 }
 
-function isResponsesLog(item: SystemLog) {
-  const endpoint = typeof item.detail?.endpoint === "string" ? item.detail.endpoint : "";
-  return endpoint === "/v1/responses" || String(item.summary || "").includes("Responses");
-}
-
-function numberValue(item: SystemLog, key: string) {
-  const value = item.detail?.[key];
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim()) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-}
-
-function formatTokenCount(value: number | null) {
-  if (value === null) return "-";
-  if (value >= 100_000) return `${(value / 1000).toFixed(1)}K`;
-  if (value >= 1000) return `${(value / 1000).toFixed(2)}K`;
-  return String(Math.round(value));
-}
-
-function formatCost(value: number | null) {
-  if (value === null) return "-";
-  return `$${value.toFixed(5)}`;
-}
-
 // 模块级缓存：路由切换会让 LogsContent 重新挂载，
 // 不缓存的话每次切回都会从 items=[] / isLoading=true 起跳，
 // 表格高度从 0 撑到 N 行，体感"跳一下"。
@@ -111,7 +84,6 @@ function LogsContent() {
   const safePage = Math.min(page, pageCount);
   const currentRows = items.slice((safePage - 1) * pageSize, safePage * pageSize);
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
-  const codexRows = useMemo(() => items.filter(isResponsesLog).slice(0, 20), [items]);
   const currentPageSelected = currentRows.length > 0 && currentRows.every((item) => selectedSet.has(item.id));
   const allSelected = items.length > 0 && items.every((item) => selectedSet.has(item.id));
 
@@ -215,53 +187,6 @@ function LogsContent() {
           </Button>
         </div>
       </div>
-
-      {isCallLog && codexRows.length > 0 ? (
-        <div className="overflow-hidden rounded-2xl border border-stone-800 bg-stone-950 text-stone-100 shadow-sm">
-          <div className="flex items-center gap-2 px-5 py-4">
-            <FileText className="size-4 text-orange-300" />
-            <h2 className="text-base font-semibold">最近20条调用记录 - Codex</h2>
-          </div>
-          <div className="overflow-x-auto px-5 pb-5">
-            <Table className="min-w-[1160px]">
-              <TableHeader>
-                <TableRow className="border-stone-800 bg-stone-900 hover:bg-stone-900">
-                  <TableHead className="text-stone-100">时间</TableHead>
-                  <TableHead className="text-stone-100">用户</TableHead>
-                  <TableHead className="text-stone-100">模型</TableHead>
-                  <TableHead className="text-right text-stone-100">输入</TableHead>
-                  <TableHead className="text-right text-stone-100">输出</TableHead>
-                  <TableHead className="text-right text-stone-100">缓存输入</TableHead>
-                  <TableHead className="text-right text-stone-100">思考token</TableHead>
-                  <TableHead className="text-right text-stone-100">总计</TableHead>
-                  <TableHead className="text-right text-stone-100">费用</TableHead>
-                  <TableHead className="text-right text-stone-100">状态</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {codexRows.map((item) => (
-                  <TableRow key={`codex-${item.id}`} className="border-stone-800 text-stone-200 hover:bg-stone-900/70">
-                    <TableCell className="whitespace-nowrap font-medium text-white">{item.time}</TableCell>
-                    <TableCell className="whitespace-nowrap text-stone-300">{getDetailText(item, "user_name")}</TableCell>
-                    <TableCell className="whitespace-nowrap font-medium text-white">{getDetailText(item, "model")}</TableCell>
-                    <TableCell className="text-right font-medium text-blue-400">{formatTokenCount(numberValue(item, "input_tokens"))}</TableCell>
-                    <TableCell className="text-right font-medium text-lime-400">{formatTokenCount(numberValue(item, "output_tokens"))}</TableCell>
-                    <TableCell className="text-right font-medium text-amber-400">{formatTokenCount(numberValue(item, "cached_input_tokens"))}</TableCell>
-                    <TableCell className="text-right font-medium text-violet-400">{formatTokenCount(numberValue(item, "reasoning_tokens"))}</TableCell>
-                    <TableCell className="text-right font-semibold text-orange-300">{formatTokenCount(numberValue(item, "total_tokens"))}</TableCell>
-                    <TableCell className="text-right font-semibold text-rose-400">{formatCost(numberValue(item, "estimated_cost_usd"))}</TableCell>
-                    <TableCell className="text-right">
-                      <Badge variant={item.detail?.status === "failed" ? "danger" : "success"} className="rounded-md">
-                        {getStatus(item)}
-                      </Badge>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        </div>
-      ) : null}
 
       <Card className="overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm">
         <CardContent className="p-0">
