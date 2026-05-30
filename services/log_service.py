@@ -5,7 +5,7 @@ import json
 import itertools
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -20,6 +20,15 @@ from utils.helper import anthropic_sse_stream, responses_sse_stream, sse_json_st
 
 LOG_TYPE_CALL = "call"
 LOG_TYPE_ACCOUNT = "account"
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+LOG_TOKEN_PRICING = {
+    "gpt-5.1": {"input": 1.25, "cached_input": 0.125, "output": 10.0},
+    "gpt-5.1-codex": {"input": 1.25, "cached_input": 0.125, "output": 10.0},
+    "gpt-5.1-codex-mini": {"input": 0.25, "cached_input": 0.025, "output": 2.0},
+    "gpt-5-mini": {"input": 0.25, "cached_input": 0.025, "output": 2.0},
+    "gpt-5-nano": {"input": 0.05, "cached_input": 0.005, "output": 0.4},
+}
 
 
 class LogService:
@@ -63,7 +72,7 @@ class LogService:
     def add(self, type: str, summary: str = "", detail: dict[str, Any] | None = None, **data: Any) -> None:
         item = {
             "id": uuid4().hex,
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "time": datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S"),
             "type": type,
             "summary": summary,
             "detail": detail or data,
@@ -140,6 +149,64 @@ def _request_excerpt(text: object, limit: int = 1000) -> str:
     if len(normalized) <= limit:
         return normalized
     return normalized[: limit - 1].rstrip() + "…"
+
+
+def _coerce_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _usage_from_result(result: object) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {}
+    usage = result.get("usage")
+    if not isinstance(usage, dict):
+        return {}
+    input_details = usage.get("input_tokens_details") if isinstance(usage.get("input_tokens_details"), dict) else {}
+    output_details = usage.get("output_tokens_details") if isinstance(usage.get("output_tokens_details"), dict) else {}
+    input_tokens = _coerce_int(usage.get("input_tokens") or usage.get("prompt_tokens"))
+    output_tokens = _coerce_int(usage.get("output_tokens") or usage.get("completion_tokens"))
+    cached_input_tokens = _coerce_int(input_details.get("cached_tokens") or input_details.get("cached_input_tokens"))
+    reasoning_tokens = _coerce_int(output_details.get("reasoning_tokens"))
+    total_tokens = _coerce_int(usage.get("total_tokens")) or input_tokens + output_tokens
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "reasoning_tokens": reasoning_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def _price_for_model(model: str) -> dict[str, float]:
+    normalized = str(model or "").strip()
+    if normalized in LOG_TOKEN_PRICING:
+        return LOG_TOKEN_PRICING[normalized]
+    if "codex-mini" in normalized:
+        return LOG_TOKEN_PRICING["gpt-5.1-codex-mini"]
+    if "codex" in normalized:
+        return LOG_TOKEN_PRICING["gpt-5.1-codex"]
+    if "nano" in normalized:
+        return LOG_TOKEN_PRICING["gpt-5-nano"]
+    if "mini" in normalized:
+        return LOG_TOKEN_PRICING["gpt-5-mini"]
+    return LOG_TOKEN_PRICING["gpt-5.1"]
+
+
+def _estimated_cost(model: str, usage: dict[str, Any]) -> float:
+    price = _price_for_model(model)
+    input_tokens = _coerce_int(usage.get("input_tokens"))
+    cached_input_tokens = min(input_tokens, _coerce_int(usage.get("cached_input_tokens")))
+    billable_input = max(0, input_tokens - cached_input_tokens)
+    output_tokens = _coerce_int(usage.get("output_tokens"))
+    cost = (
+        billable_input / 1_000_000 * float(price["input"])
+        + cached_input_tokens / 1_000_000 * float(price["cached_input"])
+        + output_tokens / 1_000_000 * float(price["output"])
+    )
+    return round(cost, 6)
 
 
 def _image_error_response(exc: Exception) -> JSONResponse:
@@ -259,6 +326,7 @@ class LoggedCall:
         # 之所以放这里而不是 api/ai.py：那边只在 dict 路径写归属，
         # StreamingResponse 路径（Android 端走的）会跳过。
         image_result_data: list[dict[str, Any]] = []
+        completed_response: dict[str, Any] | None = None
         failed = False
         try:
             for item in items:
@@ -267,6 +335,12 @@ class LoggedCall:
                     data = item.get("data")
                     if isinstance(data, list):
                         image_result_data.extend(d for d in data if isinstance(d, dict))
+                if (
+                    isinstance(item, dict)
+                    and item.get("type") == "response.completed"
+                    and isinstance(item.get("response"), dict)
+                ):
+                    completed_response = item["response"]
                 yield item
         except Exception as exc:
             failed = True
@@ -275,7 +349,7 @@ class LoggedCall:
             raise
         finally:
             if not failed:
-                self.log("流式调用结束", urls=urls)
+                self.log("流式调用结束", completed_response, urls=urls)
                 if image_result_data:
                     # 延迟 import 避免 services 间循环引用
                     from services.image_owners_service import record_owner_for_result
@@ -300,17 +374,24 @@ class LoggedCall:
 
     def log(self, suffix: str, result: object = None, status: str = "success", error: str = "",
             urls: list[str] | None = None) -> None:
+        result_model = str(result.get("model") or "") if isinstance(result, dict) else ""
+        model = result_model or self.model
         detail = {
             "key_id": self.identity.get("id"),
             "key_name": self.identity.get("name"),
+            "user_name": self.identity.get("name"),
             "role": self.identity.get("role"),
             "endpoint": self.endpoint,
-            "model": self.model,
-            "started_at": datetime.fromtimestamp(self.started).strftime("%Y-%m-%d %H:%M:%S"),
-            "ended_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "model": model,
+            "started_at": datetime.fromtimestamp(self.started, BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+            "ended_at": datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S"),
             "duration_ms": int((time.time() - self.started) * 1000),
             "status": status,
         }
+        usage = _usage_from_result(result)
+        if usage:
+            detail.update(usage)
+            detail["estimated_cost_usd"] = _estimated_cost(model, usage)
         request_excerpt = _request_excerpt(self.request_text)
         if request_excerpt:
             detail["request_text"] = request_excerpt
